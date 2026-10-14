@@ -856,8 +856,8 @@ pub struct LiveView {
 const RED: Color32 = Color32::from_rgb(255, 69, 58);
 const SIDEBAR_W: f32 = 300.0;
 
-/// Size of the floating recording-setup bar (points).
-pub const SETUP_BAR_SIZE: (f32, f32) = (560.0, 52.0);
+/// Height of the floating recording-setup bar (points); width follows content.
+pub const SETUP_BAR_HEIGHT: f32 = 52.0;
 
 /// Compact icon toggle for the setup bar (mic, camera, …).
 fn bar_toggle(ui: &mut Ui, label: &str, on: &mut bool, tip: &str) -> bool {
@@ -881,8 +881,94 @@ fn bar_toggle(ui: &mut Ui, label: &str, on: &mut bool, tip: &str) -> bool {
     false
 }
 
+/// Source kind buttons on the setup bar (clicking Window always opens the
+/// on-screen window picker).
+fn setup_source(ui: &mut Ui, s: &mut Settings, dev: &mut Devices) -> Action {
+    let p = pal(ui);
+    let kinds = [
+        (SourceKind::Display, "Display"),
+        (SourceKind::Window, "Window"),
+        (SourceKind::Area, "Area"),
+        (SourceKind::Device, "iPhone"),
+    ];
+    let mut action = Action::None;
+    egui::Frame::new()
+        .fill(if ui.visuals().dark_mode { Color32::from_rgb(0x1f, 0x1f, 0x21) } else { Color32::from_rgb(0xe3, 0xe3, 0xe6) })
+        .corner_radius(CornerRadius::same(7))
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (kind, label) in kinds {
+                    let sel = s.source == kind;
+                    let text = RichText::new(label).size(theme::SECONDARY + 1.0);
+                    let b = egui::Button::new(text)
+                        .fill(if sel { if ui.visuals().dark_mode { Color32::from_rgb(0x5c, 0x5c, 0x60) } else { Color32::WHITE } } else { Color32::TRANSPARENT })
+                        .stroke(if sel { Stroke::new(0.5, p.control_border) } else { Stroke::NONE })
+                        .corner_radius(CornerRadius::same(5))
+                        .min_size(vec2(0.0, 20.0));
+                    if ui.add(b).clicked() {
+                        s.source = kind;
+                        action = match kind {
+                            SourceKind::Window => Action::SelectWindow,
+                            SourceKind::Area => Action::SelectArea,
+                            SourceKind::Device => {
+                                if dev.ios.is_empty() {
+                                    *dev = Devices::load();
+                                }
+                                if s.ios_device.as_ref().is_none_or(|id| !dev.ios.iter().any(|d| &d.id == id)) {
+                                    s.ios_device = dev.ios.first().map(|d| d.id.clone());
+                                }
+                                Action::None
+                            }
+                            _ => Action::None,
+                        };
+                    }
+                }
+            });
+        });
+    action
+}
+
+/// Extra recording options in a compact menu off the setup bar.
+fn setup_options(ui: &mut Ui, s: &mut Settings, dev: &mut Devices) -> Action {
+    let mut save = false;
+    ui.set_min_width(240.0);
+    save |= ui.checkbox(&mut s.system_audio, "System audio").changed();
+    save |= ui.checkbox(&mut s.mic, "Microphone").changed();
+    if s.mic {
+        let mut mics = vec![(None, "Default microphone".to_string())];
+        mics.extend(dev.mics.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
+        let before = s.mic_id.clone();
+        combo(ui, "bar-mic", &mut s.mic_id, &mics, true);
+        save |= s.mic_id != before;
+        if crate::capture::camera::builtin_mic_off(s.mic_id.as_deref()) {
+            caption(ui, "Built-in mic may be silent with the lid closed.");
+        }
+    }
+    if s.camera {
+        let mut cams = vec![(None, "Default camera".to_string())];
+        cams.extend(dev.cameras.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
+        let before = s.camera_id.clone();
+        combo(ui, "bar-cam", &mut s.camera_id, &cams, true);
+        save |= s.camera_id != before;
+    }
+    ui.separator();
+    save |= ui.checkbox(&mut s.countdown, "3 s countdown").changed();
+    save |= ui.checkbox(&mut s.keys, "Record key presses").changed();
+    if matches!(s.source, SourceKind::Display | SourceKind::Area) {
+        save |= ui.checkbox(&mut s.hide_desktop_icons, "Hide desktop icons").changed();
+        save |= ui.checkbox(&mut s.hide_dock, "Hide Dock").changed();
+    }
+    row(ui, "Frame rate", |ui| {
+        save |= segmented(ui, &mut s.fps, &[(60, "60"), (30, "30")]);
+    });
+    if save { Action::SaveSettings } else { Action::None }
+}
+
 /// The small floating bar shown at launch: pick a source, toggle mic and
-/// camera, record, open recents or every recording option.
+/// camera, record, open recents or a few more options.
+/// `size` is set to the outer size the hosting window should use (points).
 pub fn setup_bar(
     ui: &mut Ui,
     s: &mut Settings,
@@ -890,63 +976,36 @@ pub fn setup_bar(
     projects: &[ProjectEntry],
     thumbs: &mut Thumbs,
     permission_note: Option<&str>,
+    size: &mut egui::Vec2,
 ) -> Action {
     let mut action = Action::None;
     let p = pal(ui);
-    let (w, h) = SETUP_BAR_SIZE;
     let area = ui.max_rect();
-    let pill = egui::Rect::from_center_size(area.center(), vec2(w.min(area.width()), h.min(area.height())));
-    let painter = ui.painter().clone();
     let dark = ui.visuals().dark_mode;
     let fill = if dark { Color32::from_rgba_unmultiplied(28, 28, 30, 235) } else { Color32::from_rgba_unmultiplied(252, 252, 252, 245) };
-    painter.rect_filled(pill, CornerRadius::same(26.0), fill);
-    painter.rect_stroke(pill, CornerRadius::same(26.0), Stroke::new(1.0, p.control_border), egui::StrokeKind::Outside);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(pill.shrink2(vec2(10.0, 8.0))), |ui| {
+    let frame = egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, p.control_border))
+        .corner_radius(CornerRadius::same(26))
+        .inner_margin(egui::Margin::symmetric(12, 8));
+    let mut inner = frame.show(ui, |ui| {
         super::toolbar_drag(ui);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let kinds = [
-                (SourceKind::Display, "Display"),
-                (SourceKind::Window, "Window"),
-                (SourceKind::Area, "Area"),
-                (SourceKind::Device, "iPhone"),
-            ];
-            if widgets::segmented(ui, &mut s.source, &kinds) {
-                action = match s.source {
-                    SourceKind::Window if s.window.is_none() => Action::SelectWindow,
-                    SourceKind::Area => Action::SelectArea,
-                    SourceKind::Device => {
-                        if dev.ios.is_empty() {
-                            *dev = Devices::load();
-                        }
-                        if s.ios_device.as_ref().is_none_or(|id| !dev.ios.iter().any(|d| &d.id == id)) {
-                            s.ios_device = dev.ios.first().map(|d| d.id.clone());
-                        }
-                        Action::None
-                    }
-                    _ => Action::None,
-                };
+            let a = setup_source(ui, s, dev);
+            if !matches!(a, Action::None) {
+                action = a;
             }
             if matches!(s.source, SourceKind::Display) && dev.displays.len() > 1 {
                 ui.menu_button("▾", |ui| {
                     for (id, label) in &dev.displays {
-                        if ui.selectable_label(s.display == id, label).clicked() {
-                            s.display = id;
+                        if ui.selectable_label(s.display == *id, label).clicked() {
+                            s.display = *id;
                         }
                     }
                 })
                 .response
                 .on_hover_text("Which display");
-            }
-            if matches!(s.source, SourceKind::Window) {
-                let tip = s
-                    .window
-                    .and_then(|id| dev.windows.iter().find(|w| w.id == id))
-                    .map(|w| w.label.clone())
-                    .unwrap_or_else(|| "Choose window…".into());
-                if ui.small_button("⋯").on_hover_text(&tip).clicked() {
-                    action = Action::SelectWindow;
-                }
             }
             ui.separator();
             if bar_toggle(ui, "Mic", &mut s.mic, "Record microphone") {
@@ -974,11 +1033,20 @@ pub fn setup_bar(
             if !matches!(recent, Action::None) {
                 action = recent;
             }
-            if ui.small_button("Options").on_hover_text("Live preview and every recording option").clicked() {
-                action = Action::FullSetup;
+            let mut opts = Action::None;
+            let om = ui.menu_button(RichText::new("Options").size(theme::SECONDARY + 1.0), |ui| {
+                opts = setup_options(ui, s, dev);
+            });
+            chevron(ui, &om.response);
+            om.response.on_hover_text("Countdown, audio, frame rate…");
+            if !matches!(opts, Action::None) {
+                action = opts;
             }
         });
     });
+    let rect = inner.response.rect;
+    *size = vec2(rect.width().max(420.0), SETUP_BAR_HEIGHT.max(rect.height()));
+    let _ = area;
     action
 }
 

@@ -303,6 +303,8 @@ struct App {
     full_setup: bool,
     /// Last position of the setup bar (top-left, screen points).
     setup_pos: Option<(f64, f64)>,
+    /// Setup bar outer size in points (width tracks content).
+    setup_size: egui::Vec2,
     /// Floating recording controls (while recording).
     bar: Option<recbar::RecordBar>,
     /// Where the user last left the bar (screen points, bottom-left).
@@ -368,6 +370,7 @@ impl App {
             setup: None,
             full_setup: false,
             setup_pos: None,
+            setup_size: egui::vec2(520.0, home::SETUP_BAR_HEIGHT),
             bar: None,
             bar_origin: None,
             overlays: vec![],
@@ -519,13 +522,12 @@ impl App {
     }
 
     fn default_setup_pos(&self) -> (f64, f64) {
-        let (sw, sh) = home::SETUP_BAR_SIZE;
+        let sw = self.setup_size.x;
         let (_, x, y, w, _h) = macos::display_frame(0);
         (x + (w - sw as f64) / 2.0, y + 72.0)
     }
 
     fn open_setup_window(&mut self, el: &ActiveEventLoop) -> Win {
-        let (sw, sh) = home::SETUP_BAR_SIZE;
         let (px, py) = self.setup_pos.unwrap_or_else(|| self.default_setup_pos());
         let attrs = Window::default_attributes()
             .with_title("Glide")
@@ -533,7 +535,7 @@ impl App {
             .with_transparent(true)
             .with_resizable(false)
             .with_position(winit::dpi::LogicalPosition::new(px, py))
-            .with_inner_size(winit::dpi::LogicalSize::new(sw, sh))
+            .with_inner_size(winit::dpi::LogicalSize::new(self.setup_size.x, self.setup_size.y))
             .with_window_level(WindowLevel::AlwaysOnTop);
         self.make_window(el, attrs, true)
     }
@@ -810,17 +812,20 @@ impl App {
                     .then(|| egui::Rect::from_min_size(egui::pos2(s.area[0] as f32, s.area[1] as f32), vec2(s.area[2] as f32, s.area[3] as f32)).intersect(screen))
                     .filter(|r| r.width() > 8.0 && r.height() > 8.0);
                 self.area = AreaPick { rect, drag: None, record_after, display: id, closed: false, windows: None };
+                self.hide_setup();
                 self.open_overlays(el, id);
             }
             Cmd::SelectWindow(record_after) => {
                 if self.recording.is_some() {
                     return;
                 }
+                self.settings.source = SourceKind::Window;
                 // Pick on the display under the pointer.
                 let display = macos::display_under_pointer();
                 let (id, ..) = macos::display_frame(display);
                 let windows = Some(WindowMode { list: winpick::list_all(), ..Default::default() });
                 self.area = AreaPick { rect: None, drag: None, record_after, display: id, closed: false, windows };
+                self.hide_setup();
                 self.open_overlays(el, id);
             }
             Cmd::Quit => {
@@ -1355,7 +1360,15 @@ impl App {
         }
         let was = home::CAPTURING_SHORTCUT.swap(false, Ordering::Relaxed);
         let note = self.permission_note.clone();
-        let action = home::setup_bar(ui, &mut self.settings, &mut self.devices, &self.projects, &mut self.thumbs, note.as_deref());
+        let action = home::setup_bar(
+            ui,
+            &mut self.settings,
+            &mut self.devices,
+            &self.projects,
+            &mut self.thumbs,
+            note.as_deref(),
+            &mut self.setup_size,
+        );
         self.handle_action(action);
         let now = home::CAPTURING_SHORTCUT.load(Ordering::Relaxed);
         if now && !was {
@@ -1779,7 +1792,7 @@ impl App {
                 });
             });
         }
-        let hint = "Click a window to choose it  ·  Right-click for more  ·  Esc to cancel";
+        let hint = "Move over a window to highlight it  ·  Click to choose  ·  Right-click for more  ·  Esc to cancel";
         let galley = painter.layout_no_wrap(hint.into(), FontId::proportional(14.0), Color32::WHITE);
         let bg = Rect::from_center_size(pos2(full.center().x, full.top() + 60.0), galley.size() + vec2(28.0, 14.0));
         painter.rect_filled(bg, egui::CornerRadius::same(10), Color32::from_black_alpha(170));
@@ -1917,6 +1930,16 @@ impl App {
             }
         });
         win.egui.handle_platform_output(&win.window, out.platform_output);
+        if which == Which::Setup {
+            let want = self.setup_size;
+            let cur = win.window.inner_size();
+            let scale = win.window.scale_factor();
+            let want_w = (want.x * scale).round().max(1.0) as u32;
+            let want_h = (want.y * scale).round().max(1.0) as u32;
+            if cur.width != want_w || cur.height != want_h {
+                let _ = win.window.request_inner_size(winit::dpi::LogicalSize::new(want.x, want.y));
+            }
+        }
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         win.repaint_at = if delay < Duration::from_secs(60) { Some(Instant::now() + delay) } else { None };
         let ppp = out.pixels_per_point;
