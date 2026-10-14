@@ -870,11 +870,14 @@ const SIDEBAR_W: f32 = 300.0;
 pub const SETUP_BAR_HEIGHT: f32 = 72.0;
 
 const BAR_TILE_H: f32 = 56.0;
-const BAR_ICON_PT: f32 = 21.0;
+const BAR_SOURCE_ICON_PT: f32 = 21.0;
+const BAR_AV_ICON_PT: f32 = 20.0;
 const BAR_LABEL_PT: f32 = 10.0;
-/// Shared vertical positions so source and AV tiles line up.
-const BAR_ICON_CENTER_Y: f32 = 17.0;
-const BAR_LABEL_BASELINE: f32 = 48.0;
+const BAR_SOURCE_ICON_Y: f32 = 17.0;
+const BAR_SOURCE_LABEL_Y: f32 = 48.0;
+const BAR_AV_PAD_LEFT: f32 = 10.0;
+const BAR_AV_ICON_TEXT_GAP: f32 = 7.0;
+const BAR_CLOSE_SIZE: f32 = 28.0;
 
 const BAR_ICON: Color32 = Color32::from_rgb(0xB8, 0xB8, 0xC0);
 const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
@@ -890,27 +893,75 @@ fn bar_divider(ui: &mut Ui) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(28));
 }
 
-fn bar_tile_width(label: &str, min: f32) -> f32 {
-    (label.len() as f32 * 5.4 + 28.0).max(min)
+fn source_tile_width(label: &str) -> f32 {
+    (label.len() as f32 * 5.4 + 28.0).max(52.0)
 }
 
-fn paint_bar_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, on: bool, active: bool) {
-    let icon_color = if on || active { BAR_ICON } else { BAR_MUTED };
-    let label_color = if on || active { BAR_LABEL } else { BAR_MUTED };
+fn av_tile_width(ui: &Ui, caption: &str) -> f32 {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(caption.to_string(), egui::FontId::proportional(BAR_LABEL_PT), BAR_LABEL);
+    let text_w = galley.size().x;
+    (BAR_AV_PAD_LEFT + BAR_AV_ICON_PT + BAR_AV_ICON_TEXT_GAP + text_w + 12.0).max(92.0)
+}
+
+fn paint_source_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, label_on: bool) {
+    let label_color = if label_on { BAR_LABEL } else { BAR_MUTED };
     ui.painter().text(
-        egui::pos2(rect.center().x, rect.min.y + BAR_ICON_CENTER_Y),
+        egui::pos2(rect.center().x, rect.min.y + BAR_SOURCE_ICON_Y),
         egui::Align2::CENTER_CENTER,
         icon,
-        egui::FontId::proportional(BAR_ICON_PT),
-        icon_color,
+        egui::FontId::proportional(BAR_SOURCE_ICON_PT),
+        BAR_ICON,
     );
     ui.painter().text(
-        egui::pos2(rect.center().x, rect.min.y + BAR_LABEL_BASELINE),
+        egui::pos2(rect.center().x, rect.min.y + BAR_SOURCE_LABEL_Y),
         egui::Align2::CENTER_CENTER,
         label,
         egui::FontId::proportional(BAR_LABEL_PT),
         label_color,
     );
+}
+
+fn paint_av_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, on: bool) {
+    let cy = rect.center().y;
+    let icon_x = rect.min.x + BAR_AV_PAD_LEFT;
+    let text_x = icon_x + BAR_AV_ICON_PT + BAR_AV_ICON_TEXT_GAP;
+    let icon_color = if on { BAR_ICON } else { BAR_MUTED };
+    let label_color = if on { BAR_LABEL } else { BAR_MUTED };
+    ui.painter().text(
+        egui::pos2(icon_x, cy),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(BAR_AV_ICON_PT),
+        icon_color,
+    );
+    ui.painter().text(
+        egui::pos2(text_x, cy),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(BAR_LABEL_PT),
+        label_color,
+    );
+}
+
+fn close_tile(ui: &mut Ui) -> egui::Response {
+    let slot = vec2(BAR_CLOSE_SIZE + 10.0, BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(slot, Sense::click());
+    let circle = egui::Rect::from_center_size(rect.center(), vec2(BAR_CLOSE_SIZE, BAR_CLOSE_SIZE));
+    if resp.hovered() {
+        ui.painter().rect_filled(circle, CornerRadius::same(14), Color32::from_white_alpha(240));
+    } else {
+        ui.painter().circle_filled(circle.center(), BAR_CLOSE_SIZE * 0.5, Color32::WHITE);
+    }
+    ui.painter().text(
+        circle.center(),
+        egui::Align2::CENTER_CENTER,
+        phi::X,
+        egui::FontId::proportional(13.0),
+        Color32::from_rgb(0x33, 0x33, 0x38),
+    );
+    resp
 }
 
 fn source_icon(kind: SourceKind) -> &'static str {
@@ -924,7 +975,7 @@ fn source_icon(kind: SourceKind) -> &'static str {
 
 /// Icon + caption; highlighted only after the source is confirmed.
 fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui::Response {
-    let size = vec2(bar_tile_width(label, 52.0), BAR_TILE_H);
+    let size = vec2(source_tile_width(label), BAR_TILE_H);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(10), BAR_HOVER);
@@ -932,36 +983,37 @@ fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui
     if active {
         ui.painter().rect_stroke(rect.shrink(4.0), CornerRadius::same(10), Stroke::new(1.0, Color32::from_white_alpha(55)), egui::StrokeKind::Inside);
     }
-    paint_bar_tile(ui, rect, source_icon(kind), label, true, active);
+    paint_source_tile(ui, rect, source_icon(kind), label, active);
     resp
 }
 
 fn av_tile(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> egui::Response {
-    let size = vec2(bar_tile_width(caption, 88.0), BAR_TILE_H);
+    let size = vec2(av_tile_width(ui, caption), BAR_TILE_H);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
     }
-    paint_bar_tile(ui, rect, icon, caption, on, false);
+    paint_av_tile(ui, rect, icon, caption, on);
     resp
 }
 
 fn gear_tile(ui: &mut Ui) -> egui::Response {
-    let size = vec2(40.0, BAR_TILE_H);
+    let size = vec2(44.0, BAR_TILE_H);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
     }
-    let c = rect.center();
+    let cy = rect.center().y;
+    let mid = rect.center().x;
     ui.painter().text(
-        c + vec2(-7.0, -1.0),
+        egui::pos2(mid - 8.0, cy),
         egui::Align2::CENTER_CENTER,
         phi::GEAR_SIX,
         egui::FontId::proportional(20.0),
         BAR_ICON,
     );
     ui.painter().text(
-        c + vec2(11.0, 2.0),
+        egui::pos2(mid + 10.0, cy),
         egui::Align2::CENTER_CENTER,
         phi::CARET_DOWN,
         egui::FontId::proportional(11.0),
@@ -1090,18 +1142,13 @@ pub fn setup_bar(
             spread: 0,
             color: Color32::from_black_alpha(90),
         })
-        .inner_margin(egui::Margin::symmetric(14, 10))
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             super::toolbar_drag(ui);
+            ui.set_min_height(BAR_TILE_H);
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let close = ui.add(
-                    egui::Button::new(bar_icon(phi::X, 14.0, Color32::from_rgb(0x33, 0x33, 0x38)))
-                        .min_size(vec2(30.0, 30.0))
-                        .corner_radius(CornerRadius::same(15))
-                        .fill(Color32::WHITE)
-                        .stroke(Stroke::NONE),
-                );
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let close = close_tile(ui);
                 if close.clicked() {
                     action = Action::Quit;
                 }
