@@ -408,6 +408,8 @@ pub enum Action {
     SelectWindow,
     /// Remember the settings now (e.g. the camera bubble was restyled).
     SaveSettings,
+    /// Open the full recording-setup window (live preview and every option).
+    FullSetup,
 }
 
 /// Outcome of the last window resize, shown under the window picker.
@@ -853,6 +855,132 @@ pub struct LiveView {
 
 const RED: Color32 = Color32::from_rgb(255, 69, 58);
 const SIDEBAR_W: f32 = 300.0;
+
+/// Size of the floating recording-setup bar (points).
+pub const SETUP_BAR_SIZE: (f32, f32) = (560.0, 52.0);
+
+/// Compact icon toggle for the setup bar (mic, camera, …).
+fn bar_toggle(ui: &mut Ui, label: &str, on: &mut bool, tip: &str) -> bool {
+    let p = pal(ui);
+    let text = RichText::new(label).size(theme::SECONDARY + 1.0).color(if *on { p.text } else { p.tertiary });
+    let fill = if *on {
+        if ui.visuals().dark_mode { Color32::from_rgb(0x5c, 0x5c, 0x60) } else { Color32::WHITE }
+    } else {
+        Color32::TRANSPARENT
+    };
+    let b = egui::Button::new(text)
+        .fill(fill)
+        .stroke(if *on { Stroke::new(0.5, p.control_border) } else { Stroke::NONE })
+        .corner_radius(CornerRadius::same(6))
+        .min_size(vec2(36.0, 28.0));
+    let r = ui.add(b).on_hover_text(tip);
+    if r.clicked() {
+        *on = !*on;
+        return true;
+    }
+    false
+}
+
+/// The small floating bar shown at launch: pick a source, toggle mic and
+/// camera, record, open recents or every recording option.
+pub fn setup_bar(
+    ui: &mut Ui,
+    s: &mut Settings,
+    dev: &mut Devices,
+    projects: &[ProjectEntry],
+    thumbs: &mut Thumbs,
+    permission_note: Option<&str>,
+) -> Action {
+    let mut action = Action::None;
+    let p = pal(ui);
+    let (w, h) = SETUP_BAR_SIZE;
+    let area = ui.max_rect();
+    let pill = egui::Rect::from_center_size(area.center(), vec2(w.min(area.width()), h.min(area.height())));
+    let painter = ui.painter().clone();
+    let dark = ui.visuals().dark_mode;
+    let fill = if dark { Color32::from_rgba_unmultiplied(28, 28, 30, 235) } else { Color32::from_rgba_unmultiplied(252, 252, 252, 245) };
+    painter.rect_filled(pill, CornerRadius::same(26.0), fill);
+    painter.rect_stroke(pill, CornerRadius::same(26.0), Stroke::new(1.0, p.control_border), egui::StrokeKind::Outside);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(pill.shrink2(vec2(10.0, 8.0))), |ui| {
+        super::toolbar_drag(ui);
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let kinds = [
+                (SourceKind::Display, "Display"),
+                (SourceKind::Window, "Window"),
+                (SourceKind::Area, "Area"),
+                (SourceKind::Device, "iPhone"),
+            ];
+            if widgets::segmented(ui, &mut s.source, &kinds) {
+                action = match s.source {
+                    SourceKind::Window if s.window.is_none() => Action::SelectWindow,
+                    SourceKind::Area => Action::SelectArea,
+                    SourceKind::Device => {
+                        if dev.ios.is_empty() {
+                            *dev = Devices::load();
+                        }
+                        if s.ios_device.as_ref().is_none_or(|id| !dev.ios.iter().any(|d| &d.id == id)) {
+                            s.ios_device = dev.ios.first().map(|d| d.id.clone());
+                        }
+                        Action::None
+                    }
+                    _ => Action::None,
+                };
+            }
+            if matches!(s.source, SourceKind::Display) && dev.displays.len() > 1 {
+                ui.menu_button("▾", |ui| {
+                    for (id, label) in &dev.displays {
+                        if ui.selectable_label(s.display == id, label).clicked() {
+                            s.display = id;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Which display");
+            }
+            if matches!(s.source, SourceKind::Window) {
+                let tip = s
+                    .window
+                    .and_then(|id| dev.windows.iter().find(|w| w.id == id))
+                    .map(|w| w.label.clone())
+                    .unwrap_or_else(|| "Choose window…".into());
+                if ui.small_button("⋯").on_hover_text(&tip).clicked() {
+                    action = Action::SelectWindow;
+                }
+            }
+            ui.separator();
+            if bar_toggle(ui, "Mic", &mut s.mic, "Record microphone") {
+                action = Action::SaveSettings;
+            }
+            if bar_toggle(ui, "Cam", &mut s.camera, "Record camera bubble") {
+                action = Action::SaveSettings;
+            }
+            ui.separator();
+            let hk = s.hotkeys.record_label();
+            let tip = if permission_note.is_some() {
+                format!("Allow Screen Recording first\n{hk}")
+            } else {
+                format!("Start recording  {hk}\n{}", source_summary(s, dev))
+            };
+            if widgets::record_button(ui, 32.0, false).on_hover_text(tip).clicked() {
+                action = Action::Record;
+            }
+            let dir = s.dir();
+            let mut recent = Action::None;
+            let r = ui.menu_button(RichText::new("Recents").size(theme::SECONDARY + 1.0), |ui| {
+                recent = recents(ui, projects, thumbs, None, &dir);
+            });
+            chevron(ui, &r.response);
+            if !matches!(recent, Action::None) {
+                action = recent;
+            }
+            if ui.small_button("Options").on_hover_text("Live preview and every recording option").clicked() {
+                action = Action::FullSetup;
+            }
+        });
+    });
+    action
+}
 
 /// Small rounded label (PREVIEW, …) in the toolbar.
 fn pill(ui: &mut Ui, text: &str, fill: Color32, fg: Color32) {
