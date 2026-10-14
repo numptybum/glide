@@ -872,7 +872,7 @@ pub const SETUP_BAR_HEIGHT: f32 = 74.0;
 const BAR_ICON: Color32 = Color32::from_rgb(0xB8, 0xB8, 0xC0);
 const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
 const BAR_MUTED: Color32 = Color32::from_rgb(0x78, 0x78, 0x80);
-const BAR_HOVER: Color32 = Color32::from_white_alpha(14);
+const BAR_HOVER: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
 
 fn bar_icon(text: &str, size: f32, color: Color32) -> RichText {
     RichText::new(text).size(size).color(color)
@@ -932,49 +932,31 @@ fn av_tile(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> egui::Response {
     resp
 }
 
-fn mic_label(s: &Settings, dev: &Devices) -> String {
-    if !s.mic {
-        return "No microphone".into();
+fn av_device_caption(on: bool, id: &Option<String>, off_label: &str, devices: &[Device], on_fallback: &str) -> String {
+    if !on {
+        return off_label.to_string();
     }
-    s.mic_id
-        .as_ref()
-        .and_then(|id| dev.mics.iter().find(|m| &m.id == id))
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| "Microphone".into())
-}
-
-fn camera_label(s: &Settings, dev: &Devices) -> String {
-    if !s.camera {
-        return "No camera".into();
-    }
-    s.camera_id
-        .as_ref()
-        .and_then(|id| dev.cameras.iter().find(|m| &m.id == id))
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| "Camera".into())
+    id.as_ref()
+        .and_then(|picked| devices.iter().find(|d| &d.id == picked))
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| on_fallback.to_string())
 }
 
 fn av_device_menu(
     ui: &mut Ui,
-    s: &Settings,
-    dev: &Devices,
     on: &mut bool,
     id: &mut Option<String>,
     off_label: &str,
     devices: &[Device],
     on_icon: &str,
     off_icon: &str,
-    label_fn: fn(&Settings, &Devices) -> String,
+    on_fallback: &str,
 ) -> Action {
-    let caption = if *on { label_fn(s, dev) } else { off_label.to_string() };
+    let caption = av_device_caption(*on, id, off_label, devices, on_fallback);
     let icon = if *on { on_icon } else { off_icon };
-    let popup = ui.id().with((off_label, "menu"));
     let tile = av_tile(ui, icon, &caption, *on);
-    if tile.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(popup));
-    }
     let mut action = Action::None;
-    egui::popup::popup_below_widget(ui, popup, &tile, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+    egui::Popup::menu(&tile).show(|ui| {
         if ui.button(off_label).clicked() {
             *on = false;
             *id = None;
@@ -994,13 +976,9 @@ fn av_device_menu(
 fn system_audio_menu(ui: &mut Ui, on: &mut bool) -> Action {
     let caption = if *on { "System audio" } else { "No system audio" };
     let icon = if *on { phi::SPEAKER_HIGH } else { phi::SPEAKER_SLASH };
-    let popup = ui.id().with("system-audio-menu");
     let tile = av_tile(ui, icon, caption, *on);
-    if tile.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(popup));
-    }
     let mut action = Action::None;
-    egui::popup::popup_below_widget(ui, popup, &tile, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+    egui::Popup::menu(&tile).show(|ui| {
         if ui.selectable_label(!*on, "No system audio").clicked() {
             *on = false;
             action = Action::SaveSettings;
@@ -1131,15 +1109,13 @@ pub fn setup_bar(
                 bar_divider(ui);
                 let mut a = av_device_menu(
                     ui,
-                    s,
-                    dev,
                     &mut s.camera,
                     &mut s.camera_id,
                     "No camera",
                     &dev.cameras,
                     phi::VIDEO_CAMERA,
                     phi::VIDEO_CAMERA_SLASH,
-                    camera_label,
+                    "Camera",
                 );
                 if !matches!(a, Action::None) {
                     action = a;
@@ -1150,15 +1126,13 @@ pub fn setup_bar(
                 }
                 a = av_device_menu(
                     ui,
-                    s,
-                    dev,
                     &mut s.mic,
                     &mut s.mic_id,
                     "No microphone",
                     &dev.mics,
                     phi::MICROPHONE,
                     phi::MICROPHONE_SLASH,
-                    mic_label,
+                    "Microphone",
                 );
                 if !matches!(a, Action::None) {
                     action = a;
