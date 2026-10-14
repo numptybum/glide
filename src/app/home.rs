@@ -868,6 +868,8 @@ const SIDEBAR_W: f32 = 300.0;
 
 /// Height of the floating recording-setup bar (points); width follows content.
 pub const SETUP_BAR_HEIGHT: f32 = 72.0;
+/// Transparent margin around the pill (setup window is clear; no clipped shadow).
+const BAR_FLOAT_PAD: f32 = 10.0;
 
 const BAR_TILE_H: f32 = 56.0;
 const BAR_SOURCE_ICON_PT: f32 = 21.0;
@@ -1128,21 +1130,18 @@ pub fn setup_bar(
 ) -> Action {
     ui.ctx().set_visuals(egui::Visuals::dark());
     let mut action = Action::None;
-    let inner = egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(36, 36, 38, 210))
-        .stroke(Stroke::new(1.0, Color32::from_white_alpha(32)))
-        .corner_radius(CornerRadius::same(24))
-        .shadow(Shadow {
-            offset: [0, 10],
-            blur: 28,
-            spread: 0,
-            color: Color32::from_black_alpha(90),
-        })
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            super::toolbar_drag(ui);
-            ui.set_min_height(BAR_TILE_H);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+    ui.add_space(BAR_FLOAT_PAD);
+    let row = ui.horizontal(|ui| {
+        ui.add_space(BAR_FLOAT_PAD);
+        let inner = egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(36, 36, 38, 210))
+            .stroke(Stroke::new(1.0, Color32::from_white_alpha(32)))
+            .corner_radius(CornerRadius::same(24))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                super::toolbar_drag(ui);
+                ui.set_min_height(BAR_TILE_H);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let close = close_tile(ui);
                 if close.clicked() {
@@ -1229,10 +1228,17 @@ pub fn setup_bar(
                 if !matches!(gear, Action::None) {
                     action = gear;
                 }
+                });
             });
-        });
-    let rect = inner.response.rect;
-    *size = vec2(rect.width() + 6.0, rect.height().max(SETUP_BAR_HEIGHT));
+        ui.add_space(BAR_FLOAT_PAD);
+        inner
+    });
+    ui.add_space(BAR_FLOAT_PAD);
+    let pill = row.inner.response.rect;
+    *size = vec2(
+        pill.width() + BAR_FLOAT_PAD * 2.0,
+        pill.height().max(SETUP_BAR_HEIGHT) + BAR_FLOAT_PAD * 2.0,
+    );
     action
 }
 

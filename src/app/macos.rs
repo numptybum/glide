@@ -90,6 +90,13 @@ pub fn inset_traffic_lights(window: &Window, x: f64, bar_h: f64) {
 }
 
 
+/// Drop shadow for borderless floating windows (setup bar).
+pub fn set_window_shadow(window: &Window, has_shadow: bool) {
+    if let Some(win) = ns_window(window) {
+        win.setHasShadow(has_shadow);
+    }
+}
+
 /// Bring the app (an accessory app without a Dock icon) to the front.
 pub fn activate() {
     if let Some(mtm) = objc2::MainThreadMarker::new() {

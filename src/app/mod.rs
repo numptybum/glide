@@ -587,7 +587,9 @@ impl App {
             .with_position(winit::dpi::LogicalPosition::new(px, py))
             .with_inner_size(winit::dpi::LogicalSize::new(self.setup_size.x, self.setup_size.y))
             .with_window_level(WindowLevel::AlwaysOnTop);
-        self.make_window(el, attrs, true)
+        let win = self.make_window(el, attrs, true);
+        macos::set_window_shadow(&win.window, true);
+        win
     }
 
     fn show_setup(&mut self, el: &ActiveEventLoop) {
@@ -838,6 +840,7 @@ impl App {
                 if self.recording.is_some() {
                     return;
                 }
+                self.bar_pick_flow = false;
                 self.settings.source = kind;
                 match kind {
                     SourceKind::Area => push(Cmd::SelectArea(true)),
@@ -1438,34 +1441,37 @@ impl App {
     }
 
     fn draw_setup(&mut self, ui: &mut egui::Ui) {
-        if let Some(e) = self.error.clone() {
-            ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(255, 69, 58), &e);
-                if ui.small_button("Dismiss").clicked() {
-                    self.error = None;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                if let Some(e) = self.error.clone() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::from_rgb(255, 69, 58), &e);
+                        if ui.small_button("Dismiss").clicked() {
+                            self.error = None;
+                        }
+                    });
+                }
+                let was = home::CAPTURING_SHORTCUT.swap(false, Ordering::Relaxed);
+                let action = home::setup_bar(
+                    ui,
+                    &mut self.settings,
+                    &mut self.devices,
+                    &self.projects,
+                    &mut self.thumbs,
+                    &self.bar_source,
+                    &mut self.setup_size,
+                );
+                self.handle_action(action);
+                let now = home::CAPTURING_SHORTCUT.load(Ordering::Relaxed);
+                if now && !was {
+                    for slot in 1..=3 {
+                        hotkey::unbind(slot);
+                    }
+                } else if was && !now {
+                    self.bind_hotkeys();
                 }
             });
-        }
-        let was = home::CAPTURING_SHORTCUT.swap(false, Ordering::Relaxed);
-        let note = self.permission_note.clone();
-        let action = home::setup_bar(
-            ui,
-            &mut self.settings,
-            &mut self.devices,
-            &self.projects,
-            &mut self.thumbs,
-            &self.bar_source,
-            &mut self.setup_size,
-        );
-        self.handle_action(action);
-        let now = home::CAPTURING_SHORTCUT.load(Ordering::Relaxed);
-        if now && !was {
-            for slot in 1..=3 {
-                hotkey::unbind(slot);
-            }
-        } else if was && !now {
-            self.bind_hotkeys();
-        }
     }
 
     /// Whether the full recording-setup view is on screen (live preview runs).
