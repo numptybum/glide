@@ -1220,8 +1220,7 @@ pub fn setup_bar(
                 bar_divider(ui);
                 let dir = s.dir();
                 let mut gear = Action::None;
-                let gear_btn = gear_tile(ui);
-                gear_btn.on_hover_text("Settings");
+                let gear_btn = gear_tile(ui).on_hover_text("Settings");
                 egui::Popup::menu(&gear_btn).show(|ui| {
                     gear = setup_gear_menu(ui, s, projects, thumbs, &dir);
                 });
