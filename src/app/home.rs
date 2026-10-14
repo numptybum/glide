@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use egui::{Align, Color32, CornerRadius, Layout, RichText, Sense, Stroke, Ui, vec2};
+use egui::{Align, Color32, CornerRadius, Layout, RichText, Sense, Shadow, Stroke, Ui, vec2};
+
+use super::bar_icons::icons::light as phi;
 use serde::{Deserialize, Serialize};
 
 use super::hotkey::Combo;
@@ -410,6 +412,14 @@ pub enum Action {
     SaveSettings,
     /// Open the full recording-setup window (live preview and every option).
     FullSetup,
+    /// Quit the app (setup bar close button).
+    Quit,
+    /// Start the flow for a capture source from the setup bar.
+    BeginSource(SourceKind),
+    /// Display chosen for recording (multi-monitor submenu).
+    UseDisplay(u32),
+    /// iPhone/iPad chosen from the Device source menu.
+    UseIosDevice(String),
 }
 
 /// Outcome of the last window resize, shown under the window picker.
@@ -857,101 +867,173 @@ const RED: Color32 = Color32::from_rgb(255, 69, 58);
 const SIDEBAR_W: f32 = 300.0;
 
 /// Height of the floating recording-setup bar (points); width follows content.
-pub const SETUP_BAR_HEIGHT: f32 = 52.0;
+pub const SETUP_BAR_HEIGHT: f32 = 74.0;
 
-/// Compact icon toggle for the setup bar (mic, camera, …).
-fn bar_toggle(ui: &mut Ui, label: &str, on: &mut bool, tip: &str) -> bool {
-    let p = pal(ui);
-    let text = RichText::new(label).size(theme::SECONDARY + 1.0).color(if *on { p.text } else { p.tertiary });
-    let fill = if *on {
-        if ui.visuals().dark_mode { Color32::from_rgb(0x5c, 0x5c, 0x60) } else { Color32::WHITE }
-    } else {
-        Color32::TRANSPARENT
-    };
-    let b = egui::Button::new(text)
-        .fill(fill)
-        .stroke(if *on { Stroke::new(0.5, p.control_border) } else { Stroke::NONE })
-        .corner_radius(CornerRadius::same(6))
-        .min_size(vec2(36.0, 28.0));
-    let r = ui.add(b).on_hover_text(tip);
-    if r.clicked() {
-        *on = !*on;
-        return true;
-    }
-    false
+const BAR_ICON: Color32 = Color32::from_rgb(0xB8, 0xB8, 0xC0);
+const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
+const BAR_MUTED: Color32 = Color32::from_rgb(0x78, 0x78, 0x80);
+const BAR_HOVER: Color32 = Color32::from_white_alpha(14);
+
+fn bar_icon(text: &str, size: f32, color: Color32) -> RichText {
+    RichText::new(text).size(size).color(color)
 }
 
-/// Source kind buttons on the setup bar (clicking Window always opens the
-/// on-screen window picker).
-fn setup_source(ui: &mut Ui, s: &mut Settings, dev: &mut Devices) -> Action {
-    let p = pal(ui);
-    let kinds = [
-        (SourceKind::Display, "Display"),
-        (SourceKind::Window, "Window"),
-        (SourceKind::Area, "Area"),
-        (SourceKind::Device, "iPhone"),
-    ];
+fn bar_divider(ui: &mut Ui) {
+    let h = 46.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, h), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(28));
+}
+
+fn source_icon(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Display => phi::MONITOR,
+        SourceKind::Window => phi::APP_WINDOW,
+        SourceKind::Area => phi::SELECTION,
+        SourceKind::Device => phi::DEVICE_MOBILE,
+    }
+}
+
+/// Icon + caption; highlighted only after the source is confirmed.
+fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui::Response {
+    let size = vec2(54.0, 58.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(10), BAR_HOVER);
+    }
+    if active {
+        ui.painter().rect_stroke(rect.shrink(4.0), CornerRadius::same(10), Stroke::new(1.0, Color32::from_white_alpha(55)), egui::StrokeKind::Inside);
+    }
+    let icon_c = rect.center_top() + vec2(0.0, 16.0);
+    ui.painter().text(icon_c, egui::Align2::CENTER_CENTER, source_icon(kind), egui::FontId::proportional(22.0), BAR_ICON);
+    ui.painter().text(
+        rect.center_bottom() - vec2(0.0, 6.0),
+        egui::Align2::CENTER_BOTTOM,
+        label,
+        egui::FontId::proportional(10.0),
+        if active { BAR_LABEL } else { BAR_MUTED },
+    );
+    resp
+}
+
+fn av_tile(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> egui::Response {
+    let w = caption.len() as f32 * 4.6 + 44.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(92.0), 58.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
+    }
+    ui.painter().text(rect.min + vec2(10.0, 10.0), egui::Align2::LEFT_TOP, icon, egui::FontId::proportional(20.0), if on { BAR_ICON } else { BAR_MUTED });
+    ui.painter().text(
+        rect.min + vec2(10.0, 34.0),
+        egui::Align2::LEFT_TOP,
+        caption,
+        egui::FontId::proportional(10.0),
+        if on { BAR_LABEL } else { BAR_MUTED },
+    );
+    resp
+}
+
+fn mic_label(s: &Settings, dev: &Devices) -> String {
+    if !s.mic {
+        return "No microphone".into();
+    }
+    s.mic_id
+        .as_ref()
+        .and_then(|id| dev.mics.iter().find(|m| &m.id == id))
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "Microphone".into())
+}
+
+fn camera_label(s: &Settings, dev: &Devices) -> String {
+    if !s.camera {
+        return "No camera".into();
+    }
+    s.camera_id
+        .as_ref()
+        .and_then(|id| dev.cameras.iter().find(|m| &m.id == id))
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "Camera".into())
+}
+
+fn av_device_menu(
+    ui: &mut Ui,
+    s: &Settings,
+    dev: &Devices,
+    on: &mut bool,
+    id: &mut Option<String>,
+    off_label: &str,
+    devices: &[Device],
+    on_icon: &str,
+    off_icon: &str,
+    label_fn: fn(&Settings, &Devices) -> String,
+) -> Action {
+    let caption = if *on { label_fn(s, dev) } else { off_label.to_string() };
+    let icon = if *on { on_icon } else { off_icon };
+    let popup = ui.id().with((off_label, "menu"));
+    let tile = av_tile(ui, icon, &caption, *on);
+    if tile.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
+    }
     let mut action = Action::None;
-    egui::Frame::new()
-        .fill(if ui.visuals().dark_mode { Color32::from_rgb(0x1f, 0x1f, 0x21) } else { Color32::from_rgb(0xe3, 0xe3, 0xe6) })
-        .corner_radius(CornerRadius::same(7))
-        .inner_margin(egui::Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
-                for (kind, label) in kinds {
-                    let sel = s.source == kind;
-                    let text = RichText::new(label).size(theme::SECONDARY + 1.0);
-                    let b = egui::Button::new(text)
-                        .fill(if sel { if ui.visuals().dark_mode { Color32::from_rgb(0x5c, 0x5c, 0x60) } else { Color32::WHITE } } else { Color32::TRANSPARENT })
-                        .stroke(if sel { Stroke::new(0.5, p.control_border) } else { Stroke::NONE })
-                        .corner_radius(CornerRadius::same(5))
-                        .min_size(vec2(0.0, 20.0));
-                    if ui.add(b).clicked() {
-                        s.source = kind;
-                        action = match kind {
-                            SourceKind::Window => Action::SelectWindow,
-                            SourceKind::Area => Action::SelectArea,
-                            SourceKind::Device => {
-                                if dev.ios.is_empty() {
-                                    *dev = Devices::load();
-                                }
-                                if s.ios_device.as_ref().is_none_or(|id| !dev.ios.iter().any(|d| &d.id == id)) {
-                                    s.ios_device = dev.ios.first().map(|d| d.id.clone());
-                                }
-                                Action::None
-                            }
-                            _ => Action::None,
-                        };
-                    }
-                }
-            });
-        });
+    egui::popup::popup_below_widget(ui, popup, &tile, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        if ui.button(off_label).clicked() {
+            *on = false;
+            *id = None;
+            action = Action::SaveSettings;
+        }
+        for d in devices {
+            if ui.button(&d.name).clicked() {
+                *on = true;
+                *id = Some(d.id.clone());
+                action = Action::SaveSettings;
+            }
+        }
+    });
     action
 }
 
-/// Extra recording options in a compact menu off the setup bar.
-fn setup_options(ui: &mut Ui, s: &mut Settings, dev: &mut Devices) -> Action {
-    let mut save = false;
-    ui.set_min_width(240.0);
-    save |= ui.checkbox(&mut s.system_audio, "System audio").changed();
-    save |= ui.checkbox(&mut s.mic, "Microphone").changed();
-    if s.mic {
-        let mut mics = vec![(None, "Default microphone".to_string())];
-        mics.extend(dev.mics.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
-        let before = s.mic_id.clone();
-        combo(ui, "bar-mic", &mut s.mic_id, &mics, true);
-        save |= s.mic_id != before;
-        if crate::capture::camera::builtin_mic_off(s.mic_id.as_deref()) {
-            caption(ui, "Built-in mic may be silent with the lid closed.");
-        }
+fn system_audio_menu(ui: &mut Ui, on: &mut bool) -> Action {
+    let caption = if *on { "System audio" } else { "No system audio" };
+    let icon = if *on { phi::SPEAKER_HIGH } else { phi::SPEAKER_SLASH };
+    let popup = ui.id().with("system-audio-menu");
+    let tile = av_tile(ui, icon, caption, *on);
+    if tile.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
     }
-    if s.camera {
-        let mut cams = vec![(None, "Default camera".to_string())];
-        cams.extend(dev.cameras.iter().map(|m| (Some(m.id.clone()), m.name.clone())));
-        let before = s.camera_id.clone();
-        combo(ui, "bar-cam", &mut s.camera_id, &cams, true);
-        save |= s.camera_id != before;
+    let mut action = Action::None;
+    egui::popup::popup_below_widget(ui, popup, &tile, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        if ui.selectable_label(!*on, "No system audio").clicked() {
+            *on = false;
+            action = Action::SaveSettings;
+        }
+        if ui.selectable_label(*on, "System audio").clicked() {
+            *on = true;
+            action = Action::SaveSettings;
+        }
+    });
+    action
+}
+
+/// Recording options in the gear menu (audio is on the bar).
+fn setup_gear_menu(
+    ui: &mut Ui,
+    s: &mut Settings,
+    projects: &[ProjectEntry],
+    thumbs: &mut Thumbs,
+    dir: &Path,
+) -> Action {
+    let mut action = Action::None;
+    let mut save = false;
+    ui.set_min_width(260.0);
+    heading(ui, "RECENT");
+    action = recent_list(ui, projects, thumbs, None, 240.0, 8);
+    ui.separator();
+    if ui.button("Open a recording…").clicked()
+        && let Some(f) = rfd::FileDialog::new().set_directory(dir).pick_folder()
+    {
+        return Action::Open(f);
+    }
+    if ui.button("Show projects folder").clicked() {
+        super::macos::open_folder(dir);
     }
     ui.separator();
     save |= ui.checkbox(&mut s.countdown, "3 s countdown").changed();
@@ -963,90 +1045,139 @@ fn setup_options(ui: &mut Ui, s: &mut Settings, dev: &mut Devices) -> Action {
     row(ui, "Frame rate", |ui| {
         save |= segmented(ui, &mut s.fps, &[(60, "60"), (30, "30")]);
     });
-    if save { Action::SaveSettings } else { Action::None }
+    if save && matches!(action, Action::None) {
+        action = Action::SaveSettings;
+    }
+    action
 }
 
-/// The small floating bar shown at launch: pick a source, toggle mic and
-/// camera, record, open recents or a few more options.
-/// `size` is set to the outer size the hosting window should use (points).
+/// Screen Studio–style setup bar. `bar_source` is set only after a source is
+/// confirmed (nothing highlighted at launch).
 pub fn setup_bar(
     ui: &mut Ui,
     s: &mut Settings,
     dev: &mut Devices,
     projects: &[ProjectEntry],
     thumbs: &mut Thumbs,
-    permission_note: Option<&str>,
+    bar_source: &Option<SourceKind>,
     size: &mut egui::Vec2,
 ) -> Action {
+    ui.ctx().set_visuals(egui::Visuals::dark());
     let mut action = Action::None;
-    let p = pal(ui);
-    let area = ui.max_rect();
-    let dark = ui.visuals().dark_mode;
-    let fill = if dark { Color32::from_rgba_unmultiplied(28, 28, 30, 235) } else { Color32::from_rgba_unmultiplied(252, 252, 252, 245) };
-    let frame = egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, p.control_border))
-        .corner_radius(CornerRadius::same(26))
-        .inner_margin(egui::Margin::symmetric(12, 8));
-    let mut inner = frame.show(ui, |ui| {
-        super::toolbar_drag(ui);
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let a = setup_source(ui, s, dev);
-            if !matches!(a, Action::None) {
-                action = a;
-            }
-            if matches!(s.source, SourceKind::Display) && dev.displays.len() > 1 {
-                ui.menu_button("▾", |ui| {
-                    for (id, label) in &dev.displays {
-                        if ui.selectable_label(s.display == *id, label).clicked() {
-                            s.display = *id;
-                        }
+    let inner = egui::Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(36, 36, 38, 210))
+        .stroke(Stroke::new(1.0, Color32::from_white_alpha(32)))
+        .corner_radius(CornerRadius::same(24))
+        .shadow(Shadow {
+            offset: [0, 10],
+            blur: 28,
+            spread: 0,
+            color: Color32::from_black_alpha(90),
+        })
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            super::toolbar_drag(ui);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let close = ui.add(
+                    egui::Button::new(bar_icon(phi::X, 14.0, Color32::from_rgb(0x33, 0x33, 0x38)))
+                        .min_size(vec2(30.0, 30.0))
+                        .corner_radius(CornerRadius::same(15))
+                        .fill(Color32::WHITE)
+                        .stroke(Stroke::NONE),
+                );
+                if close.clicked() {
+                    action = Action::Quit;
+                }
+                close.on_hover_text("Quit Glide");
+                bar_divider(ui);
+                let sources = [
+                    (SourceKind::Display, "Display"),
+                    (SourceKind::Window, "Window"),
+                    (SourceKind::Area, "Area"),
+                    (SourceKind::Device, "Device"),
+                ];
+                for (kind, label) in sources {
+                    let active = bar_source == &Some(kind);
+                    let tile = source_tile(ui, kind, label, active);
+                    if tile.clicked() {
+                        action = Action::BeginSource(kind);
                     }
-                })
-                .response
-                .on_hover_text("Which display");
-            }
-            ui.separator();
-            if bar_toggle(ui, "Mic", &mut s.mic, "Record microphone") {
-                action = Action::SaveSettings;
-            }
-            if bar_toggle(ui, "Cam", &mut s.camera, "Record camera bubble") {
-                action = Action::SaveSettings;
-            }
-            ui.separator();
-            let hk = s.hotkeys.record_label();
-            let tip = if permission_note.is_some() {
-                format!("Allow Screen Recording first\n{hk}")
-            } else {
-                format!("Start recording  {hk}\n{}", source_summary(s, dev))
-            };
-            if widgets::record_button(ui, 32.0, false).on_hover_text(tip).clicked() {
-                action = Action::Record;
-            }
-            let dir = s.dir();
-            let mut recent = Action::None;
-            let r = ui.menu_button(RichText::new("Recents").size(theme::SECONDARY + 1.0), |ui| {
-                recent = recents(ui, projects, thumbs, None, &dir);
+                    if kind == SourceKind::Display && dev.displays.len() > 1 {
+                        tile.context_menu(|ui| {
+                            for (id, name) in &dev.displays {
+                                if ui.button(name).clicked() {
+                                    action = Action::UseDisplay(*id);
+                                }
+                            }
+                        });
+                    }
+                    if kind == SourceKind::Device {
+                        if dev.ios.is_empty() {
+                            *dev = Devices::load();
+                        }
+                        tile.context_menu(|ui| {
+                            if dev.ios.is_empty() {
+                                ui.label("No device connected");
+                            }
+                            for d in &dev.ios {
+                                if ui.button(&d.name).clicked() {
+                                    action = Action::UseIosDevice(d.id.clone());
+                                }
+                            }
+                        });
+                    }
+                }
+                bar_divider(ui);
+                let mut a = av_device_menu(
+                    ui,
+                    s,
+                    dev,
+                    &mut s.camera,
+                    &mut s.camera_id,
+                    "No camera",
+                    &dev.cameras,
+                    phi::VIDEO_CAMERA,
+                    phi::VIDEO_CAMERA_SLASH,
+                    camera_label,
+                );
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                a = system_audio_menu(ui, &mut s.system_audio);
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                a = av_device_menu(
+                    ui,
+                    s,
+                    dev,
+                    &mut s.mic,
+                    &mut s.mic_id,
+                    "No microphone",
+                    &dev.mics,
+                    phi::MICROPHONE,
+                    phi::MICROPHONE_SLASH,
+                    mic_label,
+                );
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                bar_divider(ui);
+                let dir = s.dir();
+                let mut gear = Action::None;
+                let gear_label = format!("{}  {}", phi::GEAR_SIX, phi::CARET_DOWN);
+                let g = ui.menu_button(bar_icon(&gear_label, 18.0, BAR_ICON), |ui| {
+                    gear = setup_gear_menu(ui, s, projects, thumbs, &dir);
+                });
+                g.response.on_hover_text("Settings and recent recordings");
+                if !matches!(gear, Action::None) {
+                    action = gear;
+                }
             });
-            chevron(ui, &r.response);
-            if !matches!(recent, Action::None) {
-                action = recent;
-            }
-            let mut opts = Action::None;
-            let om = ui.menu_button(RichText::new("Options").size(theme::SECONDARY + 1.0), |ui| {
-                opts = setup_options(ui, s, dev);
-            });
-            chevron(ui, &om.response);
-            om.response.on_hover_text("Countdown, audio, frame rate…");
-            if !matches!(opts, Action::None) {
-                action = opts;
-            }
         });
-    });
     let rect = inner.response.rect;
-    *size = vec2(rect.width().max(420.0), SETUP_BAR_HEIGHT.max(rect.height()));
-    let _ = area;
+    *size = vec2(rect.width() + 6.0, rect.height().max(SETUP_BAR_HEIGHT));
     action
 }
 

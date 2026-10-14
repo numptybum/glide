@@ -38,6 +38,7 @@ objc2-quartz-core = "0.3"
 objc2-screen-capture-kit = { version = "0.3", features = ["block2", "dispatch2", "objc2-core-media", "objc2-core-graphics", "objc2-core-foundation", "objc2-av-foundation"] }
 
 egui = "0.36"
+egui-phosphor = { version = "0.14", features = ["subset"] }
 egui-wgpu = "0.36"
 egui-winit = "0.36"
 wgpu = "30"

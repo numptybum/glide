@@ -169,6 +169,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
         mono.push("Inter".into());
     }
+    super::bar_icons::install(&mut fonts);
     ctx.set_fonts(fonts);
 }
 

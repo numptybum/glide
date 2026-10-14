@@ -129,7 +129,8 @@ fn editor_and_home_render_every_panel() {
         t += 0.016;
         frame(&ctx, t, |ui| {
             let mut sz = egui::vec2(520.0, home::SETUP_BAR_HEIGHT);
-            let a = home::setup_bar(ui, &mut settings, &mut devices, &projects, &mut thumbs, Some("permission note"), &mut sz);
+            let bar_source = None;
+            let a = home::setup_bar(ui, &mut settings, &mut devices, &projects, &mut thumbs, &bar_source, &mut sz);
             assert!(matches!(a, home::Action::None));
         });
     }
