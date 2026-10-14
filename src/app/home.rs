@@ -1234,11 +1234,12 @@ pub fn setup_bar(
         inner
     });
     ui.add_space(BAR_FLOAT_PAD);
-    let pill = row.inner.response.rect;
+    let row_rect = row.response.rect;
     *size = vec2(
-        pill.width() + BAR_FLOAT_PAD * 2.0,
-        pill.height().max(SETUP_BAR_HEIGHT) + BAR_FLOAT_PAD * 2.0,
-    );
+        row_rect.width(),
+        row_rect.height() + BAR_FLOAT_PAD * 2.0,
+    )
+    .max(vec2(120.0, SETUP_BAR_HEIGHT));
     action
 }
 
