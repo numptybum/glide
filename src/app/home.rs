@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use egui::{Align, Color32, CornerRadius, Layout, RichText, Sense, Stroke, Ui, vec2};
+use egui::{Align, Color32, CornerRadius, Layout, RichText, Sense, Shadow, Stroke, Ui, vec2};
+
+use super::bar_icons::icons::light as phi;
 use serde::{Deserialize, Serialize};
 
 use super::hotkey::Combo;
@@ -408,6 +410,16 @@ pub enum Action {
     SelectWindow,
     /// Remember the settings now (e.g. the camera bubble was restyled).
     SaveSettings,
+    /// Open the full recording-setup window (live preview and every option).
+    FullSetup,
+    /// Quit the app (setup bar close button).
+    Quit,
+    /// Start the flow for a capture source from the setup bar.
+    BeginSource(SourceKind),
+    /// Display chosen for recording (multi-monitor submenu).
+    UseDisplay(u32),
+    /// iPhone/iPad chosen from the Device source menu.
+    UseIosDevice(String),
 }
 
 /// Outcome of the last window resize, shown under the window picker.
@@ -853,6 +865,382 @@ pub struct LiveView {
 
 const RED: Color32 = Color32::from_rgb(255, 69, 58);
 const SIDEBAR_W: f32 = 300.0;
+
+/// Height of the floating recording-setup bar (points); width follows content.
+pub const SETUP_BAR_HEIGHT: f32 = 72.0;
+/// Transparent margin around the pill (setup window is clear; no clipped shadow).
+const BAR_FLOAT_PAD: f32 = 10.0;
+
+const BAR_TILE_H: f32 = 56.0;
+const BAR_SOURCE_ICON_PT: f32 = 21.0;
+const BAR_AV_ICON_PT: f32 = 20.0;
+const BAR_LABEL_PT: f32 = 10.0;
+const BAR_SOURCE_ICON_Y: f32 = 17.0;
+const BAR_SOURCE_LABEL_Y: f32 = 48.0;
+const BAR_AV_PAD_LEFT: f32 = 10.0;
+const BAR_AV_ICON_TEXT_GAP: f32 = 7.0;
+const BAR_CLOSE_SIZE: f32 = 28.0;
+
+const BAR_ICON: Color32 = Color32::from_rgb(0xB8, 0xB8, 0xC0);
+const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
+const BAR_MUTED: Color32 = Color32::from_rgb(0x78, 0x78, 0x80);
+const BAR_HOVER: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
+
+fn bar_divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, BAR_TILE_H), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(28));
+}
+
+fn source_tile_width(label: &str) -> f32 {
+    (label.len() as f32 * 5.4 + 28.0).max(52.0)
+}
+
+fn av_tile_width(ui: &Ui, caption: &str) -> f32 {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(caption.to_string(), egui::FontId::proportional(BAR_LABEL_PT), BAR_LABEL);
+    let text_w = galley.size().x;
+    (BAR_AV_PAD_LEFT + BAR_AV_ICON_PT + BAR_AV_ICON_TEXT_GAP + text_w + 12.0).max(92.0)
+}
+
+fn paint_source_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, label_on: bool) {
+    let label_color = if label_on { BAR_LABEL } else { BAR_MUTED };
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + BAR_SOURCE_ICON_Y),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(BAR_SOURCE_ICON_PT),
+        BAR_ICON,
+    );
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + BAR_SOURCE_LABEL_Y),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(BAR_LABEL_PT),
+        label_color,
+    );
+}
+
+fn paint_av_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, on: bool) {
+    let cy = rect.center().y;
+    let icon_x = rect.min.x + BAR_AV_PAD_LEFT;
+    let text_x = icon_x + BAR_AV_ICON_PT + BAR_AV_ICON_TEXT_GAP;
+    let icon_color = if on { BAR_ICON } else { BAR_MUTED };
+    let label_color = if on { BAR_LABEL } else { BAR_MUTED };
+    ui.painter().text(
+        egui::pos2(icon_x, cy),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(BAR_AV_ICON_PT),
+        icon_color,
+    );
+    ui.painter().text(
+        egui::pos2(text_x, cy),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(BAR_LABEL_PT),
+        label_color,
+    );
+}
+
+fn close_tile(ui: &mut Ui) -> egui::Response {
+    let slot = vec2(BAR_CLOSE_SIZE + 10.0, BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(slot, Sense::click());
+    let circle = egui::Rect::from_center_size(rect.center(), vec2(BAR_CLOSE_SIZE, BAR_CLOSE_SIZE));
+    if resp.hovered() {
+        ui.painter().rect_filled(circle, CornerRadius::same(14), Color32::from_white_alpha(240));
+    } else {
+        ui.painter().circle_filled(circle.center(), BAR_CLOSE_SIZE * 0.5, Color32::WHITE);
+    }
+    ui.painter().text(
+        circle.center(),
+        egui::Align2::CENTER_CENTER,
+        phi::X,
+        egui::FontId::proportional(13.0),
+        Color32::from_rgb(0x33, 0x33, 0x38),
+    );
+    resp
+}
+
+fn source_icon(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Display => phi::MONITOR,
+        SourceKind::Window => phi::APP_WINDOW,
+        SourceKind::Area => phi::SELECTION,
+        SourceKind::Device => phi::DEVICE_MOBILE,
+    }
+}
+
+/// Icon + caption; highlighted only after the source is confirmed.
+fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui::Response {
+    let size = vec2(source_tile_width(label), BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(10), BAR_HOVER);
+    }
+    if active {
+        ui.painter().rect_stroke(rect.shrink(4.0), CornerRadius::same(10), Stroke::new(1.0, Color32::from_white_alpha(55)), egui::StrokeKind::Inside);
+    }
+    paint_source_tile(ui, rect, source_icon(kind), label, active);
+    resp
+}
+
+fn av_tile(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> egui::Response {
+    let size = vec2(av_tile_width(ui, caption), BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
+    }
+    paint_av_tile(ui, rect, icon, caption, on);
+    resp
+}
+
+fn gear_tile(ui: &mut Ui) -> egui::Response {
+    let size = vec2(44.0, BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
+    }
+    let cy = rect.center().y;
+    let mid = rect.center().x;
+    ui.painter().text(
+        egui::pos2(mid - 8.0, cy),
+        egui::Align2::CENTER_CENTER,
+        phi::GEAR_SIX,
+        egui::FontId::proportional(20.0),
+        BAR_ICON,
+    );
+    ui.painter().text(
+        egui::pos2(mid + 10.0, cy),
+        egui::Align2::CENTER_CENTER,
+        phi::CARET_DOWN,
+        egui::FontId::proportional(11.0),
+        BAR_MUTED,
+    );
+    resp
+}
+
+fn av_device_caption(on: bool, id: &Option<String>, off_label: &str, devices: &[Device], on_fallback: &str) -> String {
+    if !on {
+        return off_label.to_string();
+    }
+    id.as_ref()
+        .and_then(|picked| devices.iter().find(|d| &d.id == picked))
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| on_fallback.to_string())
+}
+
+fn av_device_menu(
+    ui: &mut Ui,
+    on: &mut bool,
+    id: &mut Option<String>,
+    off_label: &str,
+    devices: &[Device],
+    on_icon: &str,
+    off_icon: &str,
+    on_fallback: &str,
+) -> Action {
+    let caption = av_device_caption(*on, id, off_label, devices, on_fallback);
+    let icon = if *on { on_icon } else { off_icon };
+    let tile = av_tile(ui, icon, &caption, *on);
+    let mut action = Action::None;
+    egui::Popup::menu(&tile).show(|ui| {
+        if ui.button(off_label).clicked() {
+            *on = false;
+            *id = None;
+            action = Action::SaveSettings;
+        }
+        for d in devices {
+            if ui.button(&d.name).clicked() {
+                *on = true;
+                *id = Some(d.id.clone());
+                action = Action::SaveSettings;
+            }
+        }
+    });
+    action
+}
+
+fn system_audio_menu(ui: &mut Ui, on: &mut bool) -> Action {
+    let caption = if *on { "System audio" } else { "No system audio" };
+    let icon = if *on { phi::SPEAKER_HIGH } else { phi::SPEAKER_SLASH };
+    let tile = av_tile(ui, icon, caption, *on);
+    let mut action = Action::None;
+    egui::Popup::menu(&tile).show(|ui| {
+        if ui.selectable_label(!*on, "No system audio").clicked() {
+            *on = false;
+            action = Action::SaveSettings;
+        }
+        if ui.selectable_label(*on, "System audio").clicked() {
+            *on = true;
+            action = Action::SaveSettings;
+        }
+    });
+    action
+}
+
+/// Recording options in the gear menu (audio is on the bar).
+fn setup_gear_menu(
+    ui: &mut Ui,
+    s: &mut Settings,
+    projects: &[ProjectEntry],
+    thumbs: &mut Thumbs,
+    dir: &Path,
+) -> Action {
+    let mut action = Action::None;
+    let mut save = false;
+    ui.set_min_width(260.0);
+    save |= ui.checkbox(&mut s.countdown, "3 s countdown").changed();
+    save |= ui.checkbox(&mut s.keys, "Record key presses").changed();
+    if matches!(s.source, SourceKind::Display | SourceKind::Area) {
+        save |= ui.checkbox(&mut s.hide_desktop_icons, "Hide desktop icons").changed();
+        save |= ui.checkbox(&mut s.hide_dock, "Hide Dock").changed();
+    }
+    row(ui, "Frame rate", |ui| {
+        save |= segmented(ui, &mut s.fps, &[(60, "60"), (30, "30")]);
+    });
+    ui.separator();
+    if ui.button("Open a recording…").clicked()
+        && let Some(f) = rfd::FileDialog::new().set_directory(dir).pick_folder()
+    {
+        return Action::Open(f);
+    }
+    if ui.button("Show projects folder").clicked() {
+        super::macos::open_folder(dir);
+    }
+    ui.separator();
+    heading(ui, "RECENT");
+    action = recent_list(ui, projects, thumbs, None, 240.0, 8);
+    if save && matches!(action, Action::None) {
+        action = Action::SaveSettings;
+    }
+    action
+}
+
+/// Screen Studio–style setup bar. `bar_source` is set only after a source is
+/// confirmed (nothing highlighted at launch).
+pub fn setup_bar(
+    ui: &mut Ui,
+    s: &mut Settings,
+    dev: &mut Devices,
+    projects: &[ProjectEntry],
+    thumbs: &mut Thumbs,
+    bar_source: &Option<SourceKind>,
+    size: &mut egui::Vec2,
+) -> Action {
+    ui.ctx().set_visuals(egui::Visuals::dark());
+    let mut action = Action::None;
+    ui.add_space(BAR_FLOAT_PAD);
+    let row = ui.horizontal(|ui| {
+        ui.add_space(BAR_FLOAT_PAD);
+        let inner = egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(36, 36, 38, 210))
+            .stroke(Stroke::new(1.0, Color32::from_white_alpha(32)))
+            .corner_radius(CornerRadius::same(24))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                super::toolbar_drag(ui);
+                ui.set_min_height(BAR_TILE_H);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let close = close_tile(ui);
+                if close.clicked() {
+                    action = Action::Quit;
+                }
+                close.on_hover_text("Quit Glide");
+                bar_divider(ui);
+                let sources = [
+                    (SourceKind::Display, "Display"),
+                    (SourceKind::Window, "Window"),
+                    (SourceKind::Area, "Area"),
+                    (SourceKind::Device, "Device"),
+                ];
+                for (kind, label) in sources {
+                    let active = bar_source == &Some(kind);
+                    let tile = source_tile(ui, kind, label, active);
+                    if tile.clicked() {
+                        action = Action::BeginSource(kind);
+                    }
+                    if kind == SourceKind::Display && dev.displays.len() > 1 {
+                        tile.context_menu(|ui| {
+                            for (id, name) in &dev.displays {
+                                if ui.button(name).clicked() {
+                                    action = Action::UseDisplay(*id);
+                                }
+                            }
+                        });
+                    }
+                    if kind == SourceKind::Device {
+                        if dev.ios.is_empty() {
+                            *dev = Devices::load();
+                        }
+                        tile.context_menu(|ui| {
+                            if dev.ios.is_empty() {
+                                ui.label("No device connected");
+                            }
+                            for d in &dev.ios {
+                                if ui.button(&d.name).clicked() {
+                                    action = Action::UseIosDevice(d.id.clone());
+                                }
+                            }
+                        });
+                    }
+                }
+                bar_divider(ui);
+                let mut a = av_device_menu(
+                    ui,
+                    &mut s.camera,
+                    &mut s.camera_id,
+                    "No camera",
+                    &dev.cameras,
+                    phi::VIDEO_CAMERA,
+                    phi::VIDEO_CAMERA_SLASH,
+                    "Camera",
+                );
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                a = av_device_menu(
+                    ui,
+                    &mut s.mic,
+                    &mut s.mic_id,
+                    "No microphone",
+                    &dev.mics,
+                    phi::MICROPHONE,
+                    phi::MICROPHONE_SLASH,
+                    "Microphone",
+                );
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                a = system_audio_menu(ui, &mut s.system_audio);
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
+                bar_divider(ui);
+                let dir = s.dir();
+                let mut gear = Action::None;
+                let gear_btn = gear_tile(ui).on_hover_text("Settings");
+                egui::Popup::menu(&gear_btn).show(|ui| {
+                    gear = setup_gear_menu(ui, s, projects, thumbs, &dir);
+                });
+                if !matches!(gear, Action::None) {
+                    action = gear;
+                }
+                });
+            });
+        ui.add_space(BAR_FLOAT_PAD);
+        inner
+    });
+    ui.add_space(BAR_FLOAT_PAD);
+    let row_rect = row.response.rect;
+    *size = vec2(
+        row_rect.width(),
+        row_rect.height() + BAR_FLOAT_PAD * 2.0,
+    )
+    .max(vec2(120.0, SETUP_BAR_HEIGHT));
+    action
+}
 
 /// Small rounded label (PREVIEW, …) in the toolbar.
 fn pill(ui: &mut Ui, text: &str, fill: Color32, fg: Color32) {

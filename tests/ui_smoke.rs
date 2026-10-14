@@ -124,8 +124,19 @@ fn editor_and_home_render_every_panel() {
     assert!(actions.is_empty(), "no title-bar button was pressed: {actions:?}");
     let root = ed.package.root.clone();
 
-    // Start view (no recording open) with this folder as the library, every
-    // source, the recents popover and the permission note.
+    // Floating setup bar and full start view (no recording open).
+    for _ in 0..2 {
+        t += 0.016;
+        frame(&ctx, t, |ui| {
+            let mut sz = egui::vec2(520.0, home::SETUP_BAR_HEIGHT);
+            let bar_source = None;
+            let a = home::setup_bar(ui, &mut settings, &mut devices, &projects, &mut thumbs, &bar_source, &mut sz);
+            assert!(matches!(a, home::Action::None));
+        });
+    }
+
+    // Start view with this folder as the library, every source, the recents
+    // popover and the permission note.
     // With and without live preview textures (source and camera) and meters.
     let tex = ctx.load_texture("live", egui::ColorImage::new([64, 40], vec![egui::Color32::DARK_GRAY; 64 * 40]), egui::TextureOptions::LINEAR);
     for (source, live) in [

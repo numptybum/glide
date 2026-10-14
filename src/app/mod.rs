@@ -1,8 +1,10 @@
-//! The Glide app: one main window (recording setup ↔ editor), a floating
-//! recording control bar (native panel), a menu bar item and global
-//! shortcuts (default ⌥⇧⌘R). egui on wgpu with a transparent titlebar and
-//! Inter, sharing one GPU device with the editor's renderer.
+//! The Glide app: a floating recording-setup bar at launch, a main window
+//! for the full setup view and the editor, a floating recording control bar
+//! (native panel), a menu bar item and global shortcuts (default ⌥⇧⌘R).
+//! egui on wgpu with a transparent titlebar and Inter, sharing one GPU device
+//! with the editor's renderer.
 
+pub mod bar_icons;
 pub mod editor;
 pub mod maskwatch;
 pub mod home;
@@ -45,6 +47,10 @@ pub enum Cmd {
     Restart,
     Cancel,
     ShowWindow,
+    /// Show the floating recording-setup bar (idle, no project open).
+    ShowSetup,
+    /// Open the full recording-setup window (live preview and every option).
+    FullSetup,
     OpenFolder,
     /// Close the open recording and show recording setup.
     Back,
@@ -55,6 +61,8 @@ pub enum Cmd {
     SelectWindow(bool),
     /// Record a source chosen from the menu bar.
     RecordSource(SourceKind),
+    /// Source chosen from the setup bar; show start UI or record (see `after_source_confirmed`).
+    AfterSourcePick(u32),
     Quit,
 }
 
@@ -102,6 +110,8 @@ struct Win {
 #[derive(Clone, Copy, PartialEq)]
 enum Which {
     Main,
+    /// Floating recording-setup bar.
+    Setup,
     /// The picker overlay on this display.
     Overlay(u32),
 }
@@ -216,6 +226,8 @@ struct AreaPick {
     closed: bool,
     /// Picking a window instead of dragging an area.
     windows: Option<WindowMode>,
+    /// Full-screen "Start recording" after a source is chosen (no region drag).
+    start_prompt: bool,
 }
 
 /// Window-picker state: windows front to back, the clicked one, and the one
@@ -290,6 +302,14 @@ fn plog(msg: &str) {
 struct App {
     gpu: Option<Gpu>,
     main: Option<Win>,
+    /// Floating recording-setup bar (idle, no project open).
+    setup: Option<Win>,
+    /// The main window shows the full recording-setup view (not just the bar).
+    full_setup: bool,
+    /// Last position of the setup bar (top-left, screen points).
+    setup_pos: Option<(f64, f64)>,
+    /// Setup bar outer size in points (width tracks content).
+    setup_size: egui::Vec2,
     /// Floating recording controls (while recording).
     bar: Option<recbar::RecordBar>,
     /// Where the user last left the bar (screen points, bottom-left).
@@ -316,6 +336,10 @@ struct App {
     permission_note: Option<String>,
     selftest: Option<SelfTest>,
     playtest: Option<PlayTest>,
+    /// Source highlighted on the bar after it is confirmed (none at launch).
+    bar_source: Option<SourceKind>,
+    /// Picker / start prompt came from the setup bar (not selftest or menu bar).
+    bar_pick_flow: bool,
 }
 
 fn permission_note() -> Option<String> {
@@ -352,6 +376,10 @@ impl App {
         App {
             gpu: None,
             main: None,
+            setup: None,
+            full_setup: false,
+            setup_pos: None,
+            setup_size: egui::vec2(520.0, home::SETUP_BAR_HEIGHT),
             bar: None,
             bar_origin: None,
             overlays: vec![],
@@ -373,6 +401,47 @@ impl App {
             permission_note: permission_note(),
             selftest,
             playtest,
+            bar_source: None,
+            bar_pick_flow: false,
+        }
+    }
+
+    fn after_source_confirmed(&mut self, el: &ActiveEventLoop, display: u32) {
+        if !self.scripted() {
+            self.settings.save();
+        }
+        if self.settings.countdown && !self.scripted() {
+            self.bar_source = Some(self.settings.source);
+            push(Cmd::ToggleRecording);
+            return;
+        }
+        if self.scripted() && !self.bar_pick_flow {
+            push(Cmd::ShowSetup);
+            return;
+        }
+        self.area = AreaPick {
+            rect: None,
+            drag: None,
+            record_after: false,
+            display,
+            closed: false,
+            windows: None,
+            start_prompt: true,
+        };
+        self.hide_setup();
+        self.open_overlays(el, display);
+    }
+
+    fn finish_start_prompt(&mut self, start: bool) {
+        self.bar_pick_flow = false;
+        self.area.closed = true;
+        self.area.start_prompt = false;
+        self.overlays.clear();
+        if start {
+            self.bar_source = Some(self.settings.source);
+            push(Cmd::ToggleRecording);
+        } else {
+            push(Cmd::ShowSetup);
         }
     }
 
@@ -502,7 +571,65 @@ impl App {
         }
     }
 
+    fn default_setup_pos(&self) -> (f64, f64) {
+        let sw = self.setup_size.x;
+        let (_, x, y, w, _h) = macos::display_frame(0);
+        (x + (w - sw as f64) / 2.0, y + 72.0)
+    }
+
+    fn open_setup_window(&mut self, el: &ActiveEventLoop) -> Win {
+        let (px, py) = self.setup_pos.unwrap_or_else(|| self.default_setup_pos());
+        let attrs = Window::default_attributes()
+            .with_title("Glide")
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(false)
+            .with_position(winit::dpi::LogicalPosition::new(px, py))
+            .with_inner_size(winit::dpi::LogicalSize::new(self.setup_size.x, self.setup_size.y))
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        let win = self.make_window(el, attrs, true);
+        macos::set_window_shadow(&win.window, true);
+        win
+    }
+
+    fn show_setup(&mut self, el: &ActiveEventLoop) {
+        if self.setup.is_none() {
+            let w = self.open_setup_window(el);
+            self.setup = Some(w);
+        }
+        if let Some(w) = &self.setup {
+            w.window.set_visible(true);
+            w.window.focus_window();
+            w.window.request_redraw();
+        }
+        if let Some(w) = &self.main {
+            w.window.set_visible(false);
+        }
+        self.full_setup = false;
+        if !self.scripted() {
+            macos::activate();
+        }
+    }
+
+    fn hide_setup(&mut self) {
+        if let Some(w) = &self.setup {
+            let pos = w.window.outer_position().ok();
+            if let Some(p) = pos {
+                self.setup_pos = Some((p.x as f64, p.y as f64));
+            }
+            w.window.set_visible(false);
+        }
+    }
+
+    fn show_full_setup(&mut self, el: &ActiveEventLoop) {
+        self.full_setup = true;
+        self.hide_setup();
+        self.show_main(el);
+    }
+
     fn open_project(&mut self, el: &ActiveEventLoop, path: PathBuf) {
+        self.hide_setup();
+        self.full_setup = false;
         self.show_main(el);
         let Some(gpu) = self.gpu.clone() else { return };
         match Editor::open(&path, gpu) {
@@ -596,6 +723,7 @@ impl App {
         if let Some(w) = &self.main {
             w.window.set_visible(false);
         }
+        self.hide_setup();
         if self.bar.is_none()
             && let Some(mtm) = objc2::MainThreadMarker::new()
         {
@@ -623,7 +751,7 @@ impl App {
                 self.error = Some(format!("Couldn't start recording: {e:#}"));
                 self.close_bar();
                 self.permission_note = permission_note();
-                push(Cmd::ShowWindow);
+                push(Cmd::ShowSetup);
             }
         }
     }
@@ -632,7 +760,7 @@ impl App {
         let Some(rec) = self.recording.take() else { return };
         self.close_bar();
         let Some(r) = rec.rec else {
-            push(Cmd::ShowWindow);
+            push(Cmd::ShowSetup);
             return;
         };
         self.finishing = true;
@@ -662,7 +790,7 @@ impl App {
         // Restarting keeps the recording bar up for the new take.
         if !restarting {
             self.close_bar();
-            push(Cmd::ShowWindow);
+            push(Cmd::ShowSetup);
         }
     }
 
@@ -694,7 +822,17 @@ impl App {
                 }
             }
             Cmd::Cancel => self.cancel_recording(false),
-            Cmd::ShowWindow => self.show_main(el),
+            Cmd::ShowWindow => {
+                if matches!(self.view, View::Editor(_)) {
+                    self.show_main(el);
+                } else if self.full_setup {
+                    self.show_main(el);
+                } else {
+                    self.show_setup(el);
+                }
+            }
+            Cmd::ShowSetup => self.show_setup(el),
+            Cmd::FullSetup => self.show_full_setup(el),
             Cmd::OpenFolder => macos::open_folder(&self.settings.dir()),
             Cmd::Back => self.close_project(),
             Cmd::Open(p) => self.open_project(el, p),
@@ -702,6 +840,7 @@ impl App {
                 if self.recording.is_some() {
                     return;
                 }
+                self.bar_pick_flow = false;
                 self.settings.source = kind;
                 match kind {
                     SourceKind::Area => push(Cmd::SelectArea(true)),
@@ -725,20 +864,24 @@ impl App {
                 let rect = (same_display && s.source == SourceKind::Area && s.area[2] > 8.0 && s.area[3] > 8.0)
                     .then(|| egui::Rect::from_min_size(egui::pos2(s.area[0] as f32, s.area[1] as f32), vec2(s.area[2] as f32, s.area[3] as f32)).intersect(screen))
                     .filter(|r| r.width() > 8.0 && r.height() > 8.0);
-                self.area = AreaPick { rect, drag: None, record_after, display: id, closed: false, windows: None };
+                self.area = AreaPick { rect, drag: None, record_after, display: id, closed: false, windows: None, start_prompt: false };
+                self.hide_setup();
                 self.open_overlays(el, id);
             }
             Cmd::SelectWindow(record_after) => {
                 if self.recording.is_some() {
                     return;
                 }
+                self.settings.source = SourceKind::Window;
                 // Pick on the display under the pointer.
                 let display = macos::display_under_pointer();
                 let (id, ..) = macos::display_frame(display);
                 let windows = Some(WindowMode { list: winpick::list_all(), ..Default::default() });
-                self.area = AreaPick { rect: None, drag: None, record_after, display: id, closed: false, windows };
+                self.area = AreaPick { rect: None, drag: None, record_after, display: id, closed: false, windows, start_prompt: false };
+                self.hide_setup();
                 self.open_overlays(el, id);
             }
+            Cmd::AfterSourcePick(display) => self.after_source_confirmed(el, display),
             Cmd::Quit => {
                 if let View::Editor(ed) = &mut self.view {
                     ed.save();
@@ -786,7 +929,7 @@ impl App {
                 }
                 Err(e) => {
                     self.error = Some(format!("Recording failed: {e}"));
-                    self.show_main(el);
+                    self.show_setup(el);
                 }
             }
         }
@@ -980,20 +1123,14 @@ impl App {
         match st.phase {
             0 if since > Duration::from_millis(800) => {
                 let start = matches!(self.view, View::Start);
-                // The display's live preview fills the canvas (when Screen
-                // Recording is allowed); give it a few seconds to arrive.
                 self.settings.source = SourceKind::Display;
-                let screen = crate::capture::tcc::screen_status() == crate::capture::tcc::Status::Granted;
-                if screen && self.live.tex.is_none() && since < Duration::from_secs(6) {
-                    return;
-                }
-                let live = self.live.tex.map(|t| t.1);
-                log(&format!("launched main_window={} menubar={} start_view={start} live_preview={live:?}", self.main.is_some(), self.menubar.is_some()));
+                let setup = self.setup.is_some();
+                log(&format!("launched setup_bar={setup} main_window={} menubar={} start_view={start}", self.main.is_some(), self.menubar.is_some()));
                 if !start {
                     fail("didn't open on recording setup".into());
                 }
-                if screen && live.is_none() {
-                    fail("no live preview frames".into());
+                if !setup {
+                    fail("setup bar did not open".into());
                 }
                 st.phase = 10;
                 st.at = Instant::now();
@@ -1148,8 +1285,9 @@ impl App {
             // popover; reopen it from there.
             4 if since > Duration::from_millis(300) => {
                 let first = self.projects.first().map(|p| p.path.clone());
-                log(&format!("back start_view={} recent={:?}", matches!(self.view, View::Start), first.as_ref().map(|p| p.display().to_string())));
-                if !matches!(self.view, View::Start) || first.is_none() || first != st.package {
+                let setup = self.setup.as_ref().is_some_and(|w| w.window.is_visible() != Some(false));
+                log(&format!("back start_view={} setup_bar={setup} recent={:?}", matches!(self.view, View::Start), first.as_ref().map(|p| p.display().to_string())));
+                if !matches!(self.view, View::Start) || !setup || first.is_none() || first != st.package {
                     fail("back to recording setup / recents".into());
                 }
                 st.phase = 5;
@@ -1192,7 +1330,10 @@ impl App {
         }
         let was = home::CAPTURING_SHORTCUT.swap(false, Ordering::Relaxed);
         let note = self.permission_note.clone();
-        let action = match &mut self.view {
+        let action = if matches!(&self.view, View::Start) && !self.full_setup {
+            home::Action::None
+        } else {
+            match &mut self.view {
             View::Start => {
                 let live = self.live_view(ui.ctx(), renderer);
                 home::start_view(ui, &mut self.settings, &mut self.devices, &self.projects, &mut self.thumbs, note.as_deref(), &live)
@@ -1208,6 +1349,7 @@ impl App {
                 ed.ui(ui, renderer, &mut chrome);
                 chrome.action
             }
+        }
         };
         self.handle_action(action);
         let now = home::CAPTURING_SHORTCUT.load(Ordering::Relaxed);
@@ -1256,21 +1398,102 @@ impl App {
                 self.devices = home::Devices::load();
             }
             home::Action::Back => self.close_project(),
+            home::Action::FullSetup => push(Cmd::FullSetup),
+            home::Action::Quit => push(Cmd::Quit),
+            home::Action::BeginSource(kind) => {
+                self.bar_pick_flow = true;
+                self.settings.source = kind;
+                match kind {
+                    SourceKind::Display => {
+                        let d = macos::display_under_pointer();
+                        self.settings.display = d;
+                        push(Cmd::AfterSourcePick(d));
+                    }
+                    SourceKind::Window => push(Cmd::SelectWindow(false)),
+                    SourceKind::Area => push(Cmd::SelectArea(false)),
+                    SourceKind::Device => {
+                        self.devices = home::Devices::load();
+                        if self.devices.ios.is_empty() {
+                            self.error = Some("Connect an iPhone or iPad with a cable, unlock it and trust this Mac.".into());
+                        } else if self.devices.ios.len() == 1 {
+                            self.settings.ios_device = Some(self.devices.ios[0].id.clone());
+                            push(Cmd::AfterSourcePick(macos::display_under_pointer()));
+                        } else {
+                            self.error = Some("Right-click Device to choose which iPhone or iPad to record.".into());
+                        }
+                    }
+                }
+            }
+            home::Action::UseDisplay(id) => {
+                self.bar_pick_flow = true;
+                self.settings.source = SourceKind::Display;
+                self.settings.display = id;
+                push(Cmd::AfterSourcePick(id));
+            }
+            home::Action::UseIosDevice(id) => {
+                self.bar_pick_flow = true;
+                self.settings.source = SourceKind::Device;
+                self.settings.ios_device = Some(id);
+                push(Cmd::AfterSourcePick(macos::display_under_pointer()));
+            }
             home::Action::None => {}
         }
+    }
+
+    fn draw_setup(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                if let Some(e) = self.error.clone() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::from_rgb(255, 69, 58), &e);
+                        if ui.small_button("Dismiss").clicked() {
+                            self.error = None;
+                        }
+                    });
+                }
+                let was = home::CAPTURING_SHORTCUT.swap(false, Ordering::Relaxed);
+                let action = home::setup_bar(
+                    ui,
+                    &mut self.settings,
+                    &mut self.devices,
+                    &self.projects,
+                    &mut self.thumbs,
+                    &self.bar_source,
+                    &mut self.setup_size,
+                );
+                self.handle_action(action);
+                let now = home::CAPTURING_SHORTCUT.load(Ordering::Relaxed);
+                if now && !was {
+                    for slot in 1..=3 {
+                        hotkey::unbind(slot);
+                    }
+                } else if was && !now {
+                    self.bind_hotkeys();
+                }
+            });
+    }
+
+    /// Whether the full recording-setup view is on screen (live preview runs).
+    fn full_setup_visible(&self) -> bool {
+        let visible = self.main.as_ref().is_some_and(|w| w.window.is_visible() != Some(false)) && !self.main_occluded;
+        self.full_setup && matches!(self.view, View::Start) && visible && self.recording.is_none() && !self.finishing
     }
 
     /// Whether recording setup is on screen with nothing being recorded
     /// (when its previews and meters run).
     fn setup_visible(&self) -> bool {
-        let visible = self.main.as_ref().is_some_and(|w| w.window.is_visible() != Some(false)) && !self.main_occluded;
-        matches!(self.view, View::Start) && visible && self.recording.is_none() && !self.finishing
+        self.full_setup_visible()
+            || (self.setup.as_ref().is_some_and(|w| w.window.is_visible() != Some(false))
+                && matches!(self.view, View::Start)
+                && self.recording.is_none()
+                && !self.finishing)
     }
 
     /// The source to preview live, if the recording-setup canvas is showing
     /// and nothing is being recorded.
     fn live_source(&self) -> Option<livecap::Source> {
-        if !self.setup_visible() {
+        if !self.full_setup_visible() {
             return None;
         }
         let s = &self.settings;
@@ -1294,14 +1517,14 @@ impl App {
         if self.settings.resolve_window(&self.devices) && !self.scripted() {
             self.settings.save();
         }
-        let visible = self.setup_visible();
+        let full = self.full_setup_visible();
         let s = &self.settings;
         let screen = self.live_source().map(|src| {
             let audio = s.system_audio && !matches!(src, livecap::Source::Device { .. });
             (src, audio)
         });
-        let camera = (visible && s.camera).then(|| livecap::Source::Camera { id: s.camera_id.clone() });
-        let mic = (visible && s.mic && self.selftest.is_none()).then(|| s.mic_id.as_ref().and_then(|id| self.devices.mics.iter().find(|m| &m.id == id)).map(|m| m.name.clone()));
+        let camera = (full && s.camera).then(|| livecap::Source::Camera { id: s.camera_id.clone() });
+        let mic = (full && s.mic && self.selftest.is_none()).then(|| s.mic_id.as_ref().and_then(|id| self.devices.mics.iter().find(|m| &m.id == id)).map(|m| m.name.clone()));
         let live = &mut self.live;
         // Screens at native resolution, scaled to the canvas (30 fps, as Rec).
         if live.screen.update(screen, "live preview", |(src, audio)| livecap::LivePreview::start(src, 0, 30, *audio, wake).map_err(|e| format!("{e:#}"))) {
@@ -1407,6 +1630,42 @@ impl App {
         self.projects = home::scan_projects(&self.settings.dir());
         if let Some(w) = &self.main {
             w.window.set_title("Glide");
+            w.window.set_visible(false);
+        }
+        self.full_setup = false;
+        self.bar_source = None;
+        self.bar_pick_flow = false;
+        push(Cmd::ShowSetup);
+    }
+
+    /// "Start recording" over the chosen display (after the setup bar flow).
+    fn draw_start_prompt(&mut self, ui: &mut egui::Ui) {
+        use egui::{Align2, FontId, Pos2, Rect, pos2};
+        let full = ui.max_rect();
+        ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(110));
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.finish_start_prompt(false);
+            return;
+        }
+        let hint = "Press Esc to cancel";
+        let galley = ui.painter().layout_no_wrap(hint.into(), FontId::proportional(13.0), Color32::from_white_alpha(200));
+        let hint_pos = pos2(full.center().x, full.top() + 56.0);
+        ui.painter().galley(hint_pos - vec2(galley.size().x / 2.0, 0.0), galley, Color32::WHITE);
+        let mut start = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let bar = Rect::from_center_size(full.center(), vec2(240.0, 44.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+            ui.horizontal(|ui| {
+                if widgets::primary(ui, "Start recording").clicked() {
+                    start = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.finish_start_prompt(false);
+                    return;
+                }
+            });
+        });
+        if start {
+            self.finish_start_prompt(true);
         }
     }
 
@@ -1416,6 +1675,14 @@ impl App {
         use egui::{Align2, FontId, Pos2, Rect, Stroke, pos2};
         if self.area.windows.is_some() {
             self.draw_window_picker(ui, display);
+            return;
+        }
+        if self.area.start_prompt {
+            if self.area.display != display {
+                ui.painter().rect_filled(ui.max_rect(), 0.0, Color32::from_black_alpha(80));
+                return;
+            }
+            self.draw_start_prompt(ui);
             return;
         }
         let full = ui.max_rect();
@@ -1660,7 +1927,7 @@ impl App {
                 });
             });
         }
-        let hint = "Click a window to choose it  ·  Right-click for more  ·  Esc to cancel";
+        let hint = "Move over a window to highlight it  ·  Click to choose  ·  Right-click for more  ·  Esc to cancel";
         let galley = painter.layout_no_wrap(hint.into(), FontId::proportional(14.0), Color32::WHITE);
         let bg = Rect::from_center_size(pos2(full.center().x, full.top() + 60.0), galley.size() + vec2(28.0, 14.0));
         painter.rect_filled(bg, egui::CornerRadius::same(10), Color32::from_black_alpha(170));
@@ -1694,8 +1961,19 @@ impl App {
 
     /// Close the window picker; with a window, use it (and record if asked).
     fn finish_window(&mut self, id: Option<u32>) {
+        let record_after = self.area.record_after;
+        let bar = self.bar_pick_flow;
+        let display = self.area.display;
+        let picked_display = id.and_then(|wid| {
+            self.area
+                .windows
+                .as_ref()
+                .and_then(|wm| wm.list.iter().find(|w| w.entry.id == wid))
+                .map(|w| w.display)
+        });
         self.area.closed = true;
         self.area.windows = None;
+        self.area.start_prompt = false;
         self.overlays.clear();
         match id {
             Some(id) => {
@@ -1706,31 +1984,43 @@ impl App {
                     self.settings.save();
                 }
                 self.devices = Devices::load();
-                push(if self.area.record_after { Cmd::ToggleRecording } else { Cmd::ShowWindow });
-            }
-            None => {
-                if !self.area.record_after || self.settings.source != SourceKind::Display {
-                    push(Cmd::ShowWindow);
+                if record_after {
+                    push(Cmd::ToggleRecording);
+                } else if bar {
+                    push(Cmd::AfterSourcePick(picked_display.unwrap_or(display)));
+                } else {
+                    push(Cmd::ShowSetup);
                 }
             }
+            None => push(Cmd::ShowSetup),
         }
     }
 
     /// Close the area picker; with a rect, save it (and record if asked).
     fn finish_area(&mut self, rect: Option<egui::Rect>) {
+        let record_after = self.area.record_after;
+        let bar = self.bar_pick_flow;
+        let display = self.area.display;
         self.area.closed = true;
+        self.area.start_prompt = false;
         self.overlays.clear();
         match rect {
             Some(r) => {
                 self.settings.source = SourceKind::Area;
-                self.settings.display = self.area.display;
+                self.settings.display = display;
                 self.settings.area = [r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64];
                 if !self.scripted() {
                     self.settings.save();
                 }
-                push(if self.area.record_after { Cmd::ToggleRecording } else { Cmd::ShowWindow });
+                if record_after {
+                    push(Cmd::ToggleRecording);
+                } else if bar {
+                    push(Cmd::AfterSourcePick(display));
+                } else {
+                    push(Cmd::ShowSetup);
+                }
             }
-            None => push(Cmd::ShowWindow),
+            None => push(Cmd::ShowSetup),
         }
     }
 
@@ -1738,6 +2028,8 @@ impl App {
         let is = |w: &Option<Win>| w.as_ref().is_some_and(|w| w.window.id() == id);
         if is(&self.main) {
             Some(Which::Main)
+        } else if is(&self.setup) {
+            Some(Which::Setup)
         } else {
             self.overlays.iter().find(|w| w.window.id() == id).map(|w| Which::Overlay(w.display))
         }
@@ -1747,6 +2039,7 @@ impl App {
     fn take_window(&mut self, which: Which) -> Option<Win> {
         match which {
             Which::Main => self.main.take(),
+            Which::Setup => self.setup.take(),
             Which::Overlay(d) => {
                 let i = self.overlays.iter().position(|w| w.display == d)?;
                 Some(self.overlays.remove(i))
@@ -1757,6 +2050,7 @@ impl App {
     fn window_mut(&mut self, which: Which) -> Option<&mut Win> {
         match which {
             Which::Main => self.main.as_mut(),
+            Which::Setup => self.setup.as_mut(),
             Which::Overlay(d) => self.overlays.iter_mut().find(|w| w.display == d),
         }
     }
@@ -1764,6 +2058,7 @@ impl App {
     fn put_back(&mut self, which: Which, win: Win) {
         match which {
             Which::Main => self.main = Some(win),
+            Which::Setup => self.setup = Some(win),
             Which::Overlay(_) => self.overlays.push(win),
         }
     }
@@ -1784,6 +2079,7 @@ impl App {
         let mut keep = true;
         let out = ctx.run_ui(input, |ui| match which {
             Which::Main => self.draw_main(ui, renderer),
+            Which::Setup => self.draw_setup(ui),
             Which::Overlay(display) => {
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
                     self.draw_overlay(ui, display);
@@ -1792,6 +2088,16 @@ impl App {
             }
         });
         win.egui.handle_platform_output(&win.window, out.platform_output);
+        if which == Which::Setup {
+            let want = self.setup_size;
+            let cur = win.window.inner_size();
+            let scale = win.window.scale_factor() as f32;
+            let want_w = (want.x * scale).round().max(1.0) as u32;
+            let want_h = (want.y * scale).round().max(1.0) as u32;
+            if cur.width != want_w || cur.height != want_h {
+                let _ = win.window.request_inner_size(winit::dpi::LogicalSize::new(want.x, want.y));
+            }
+        }
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
         win.repaint_at = if delay < Duration::from_secs(60) { Some(Instant::now() + delay) } else { None };
         let ppp = out.pixels_per_point;
@@ -1868,15 +2174,16 @@ impl ApplicationHandler for App {
         let mtm = objc2::MainThreadMarker::new().expect("main thread");
         self.menubar = Some(menubar::MenuBar::new(mtm));
         self.bind_hotkeys();
-        self.show_main(el);
         if let Some(p) = self.open_at_launch.take() {
             self.open_project(el, p);
+        } else {
+            self.show_setup(el);
         }
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, _: ()) {
         self.tick(el);
-        for w in self.main.iter().chain(&self.overlays) {
+        for w in self.main.iter().chain(self.setup.iter()).chain(&self.overlays) {
             w.window.request_redraw();
         }
     }
@@ -1890,11 +2197,20 @@ impl ApplicationHandler for App {
         if matches!(event, WindowEvent::CloseRequested) {
             match which {
                 Which::Main => {
+                    if matches!(self.view, View::Start) && self.full_setup {
+                        self.full_setup = false;
+                        if let Some(w) = &self.main {
+                            w.window.set_visible(false);
+                        }
+                        push(Cmd::ShowSetup);
+                        return;
+                    }
                     if let View::Editor(ed) = &mut self.view {
                         ed.save();
                     }
                     push(Cmd::Quit);
                 }
+                Which::Setup => push(Cmd::Quit),
                 Which::Overlay(_) => {
                     self.area.closed = true;
                     self.area.windows = None;
@@ -1920,6 +2236,9 @@ impl ApplicationHandler for App {
                     win.surface.configure(&g.device, &win.config);
                 }
                 win.window.request_redraw();
+            }
+            WindowEvent::Moved(pos) if which == Which::Setup => {
+                self.setup_pos = Some((pos.x as f64, pos.y as f64));
             }
             WindowEvent::ThemeChanged(_) => {
                 theme::set_accent(theme::system_accent());
@@ -1978,7 +2297,7 @@ impl ApplicationHandler for App {
             w.window.request_redraw();
             next = now + Duration::from_millis(8);
         }
-        for w in self.main.iter_mut().chain(self.overlays.iter_mut()) {
+        for w in self.main.iter_mut().chain(self.setup.iter_mut()).chain(self.overlays.iter_mut()) {
             if let Some(t) = w.repaint_at {
                 if t <= now {
                     w.repaint_at = None;
