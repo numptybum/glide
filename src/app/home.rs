@@ -867,7 +867,14 @@ const RED: Color32 = Color32::from_rgb(255, 69, 58);
 const SIDEBAR_W: f32 = 300.0;
 
 /// Height of the floating recording-setup bar (points); width follows content.
-pub const SETUP_BAR_HEIGHT: f32 = 74.0;
+pub const SETUP_BAR_HEIGHT: f32 = 72.0;
+
+const BAR_TILE_H: f32 = 56.0;
+const BAR_ICON_PT: f32 = 21.0;
+const BAR_LABEL_PT: f32 = 10.0;
+/// Shared vertical positions so source and AV tiles line up.
+const BAR_ICON_CENTER_Y: f32 = 17.0;
+const BAR_LABEL_BASELINE: f32 = 48.0;
 
 const BAR_ICON: Color32 = Color32::from_rgb(0xB8, 0xB8, 0xC0);
 const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
@@ -879,9 +886,31 @@ fn bar_icon(text: &str, size: f32, color: Color32) -> RichText {
 }
 
 fn bar_divider(ui: &mut Ui) {
-    let h = 46.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(1.0, h), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, BAR_TILE_H), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(28));
+}
+
+fn bar_tile_width(label: &str, min: f32) -> f32 {
+    (label.len() as f32 * 5.4 + 28.0).max(min)
+}
+
+fn paint_bar_tile(ui: &mut Ui, rect: egui::Rect, icon: &str, label: &str, on: bool, active: bool) {
+    let icon_color = if on || active { BAR_ICON } else { BAR_MUTED };
+    let label_color = if on || active { BAR_LABEL } else { BAR_MUTED };
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + BAR_ICON_CENTER_Y),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(BAR_ICON_PT),
+        icon_color,
+    );
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + BAR_LABEL_BASELINE),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(BAR_LABEL_PT),
+        label_color,
+    );
 }
 
 fn source_icon(kind: SourceKind) -> &'static str {
@@ -895,7 +924,7 @@ fn source_icon(kind: SourceKind) -> &'static str {
 
 /// Icon + caption; highlighted only after the source is confirmed.
 fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui::Response {
-    let size = vec2(54.0, 58.0);
+    let size = vec2(bar_tile_width(label, 52.0), BAR_TILE_H);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect.shrink(3.0), CornerRadius::same(10), BAR_HOVER);
@@ -903,31 +932,40 @@ fn source_tile(ui: &mut Ui, kind: SourceKind, label: &str, active: bool) -> egui
     if active {
         ui.painter().rect_stroke(rect.shrink(4.0), CornerRadius::same(10), Stroke::new(1.0, Color32::from_white_alpha(55)), egui::StrokeKind::Inside);
     }
-    let icon_c = rect.center_top() + vec2(0.0, 16.0);
-    ui.painter().text(icon_c, egui::Align2::CENTER_CENTER, source_icon(kind), egui::FontId::proportional(22.0), BAR_ICON);
-    ui.painter().text(
-        rect.center_bottom() - vec2(0.0, 6.0),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::proportional(10.0),
-        if active { BAR_LABEL } else { BAR_MUTED },
-    );
+    paint_bar_tile(ui, rect, source_icon(kind), label, true, active);
     resp
 }
 
 fn av_tile(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> egui::Response {
-    let w = caption.len() as f32 * 4.6 + 44.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(92.0), 58.0), Sense::click());
+    let size = vec2(bar_tile_width(caption, 88.0), BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
     }
-    ui.painter().text(rect.min + vec2(10.0, 10.0), egui::Align2::LEFT_TOP, icon, egui::FontId::proportional(20.0), if on { BAR_ICON } else { BAR_MUTED });
+    paint_bar_tile(ui, rect, icon, caption, on, false);
+    resp
+}
+
+fn gear_tile(ui: &mut Ui) -> egui::Response {
+    let size = vec2(40.0, BAR_TILE_H);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), BAR_HOVER);
+    }
+    let c = rect.center();
     ui.painter().text(
-        rect.min + vec2(10.0, 34.0),
-        egui::Align2::LEFT_TOP,
-        caption,
-        egui::FontId::proportional(10.0),
-        if on { BAR_LABEL } else { BAR_MUTED },
+        c + vec2(-7.0, -1.0),
+        egui::Align2::CENTER_CENTER,
+        phi::GEAR_SIX,
+        egui::FontId::proportional(20.0),
+        BAR_ICON,
+    );
+    ui.painter().text(
+        c + vec2(11.0, 2.0),
+        egui::Align2::CENTER_CENTER,
+        phi::CARET_DOWN,
+        egui::FontId::proportional(11.0),
+        BAR_MUTED,
     );
     resp
 }
@@ -1002,8 +1040,15 @@ fn setup_gear_menu(
     let mut action = Action::None;
     let mut save = false;
     ui.set_min_width(260.0);
-    heading(ui, "RECENT");
-    action = recent_list(ui, projects, thumbs, None, 240.0, 8);
+    save |= ui.checkbox(&mut s.countdown, "3 s countdown").changed();
+    save |= ui.checkbox(&mut s.keys, "Record key presses").changed();
+    if matches!(s.source, SourceKind::Display | SourceKind::Area) {
+        save |= ui.checkbox(&mut s.hide_desktop_icons, "Hide desktop icons").changed();
+        save |= ui.checkbox(&mut s.hide_dock, "Hide Dock").changed();
+    }
+    row(ui, "Frame rate", |ui| {
+        save |= segmented(ui, &mut s.fps, &[(60, "60"), (30, "30")]);
+    });
     ui.separator();
     if ui.button("Open a recording…").clicked()
         && let Some(f) = rfd::FileDialog::new().set_directory(dir).pick_folder()
@@ -1014,15 +1059,8 @@ fn setup_gear_menu(
         super::macos::open_folder(dir);
     }
     ui.separator();
-    save |= ui.checkbox(&mut s.countdown, "3 s countdown").changed();
-    save |= ui.checkbox(&mut s.keys, "Record key presses").changed();
-    if matches!(s.source, SourceKind::Display | SourceKind::Area) {
-        save |= ui.checkbox(&mut s.hide_desktop_icons, "Hide desktop icons").changed();
-        save |= ui.checkbox(&mut s.hide_dock, "Hide Dock").changed();
-    }
-    row(ui, "Frame rate", |ui| {
-        save |= segmented(ui, &mut s.fps, &[(60, "60"), (30, "30")]);
-    });
+    heading(ui, "RECENT");
+    action = recent_list(ui, projects, thumbs, None, 240.0, 8);
     if save && matches!(action, Action::None) {
         action = Action::SaveSettings;
     }
@@ -1055,8 +1093,8 @@ pub fn setup_bar(
         .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
             super::toolbar_drag(ui);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 let close = ui.add(
                     egui::Button::new(bar_icon(phi::X, 14.0, Color32::from_rgb(0x33, 0x33, 0x38)))
                         .min_size(vec2(30.0, 30.0))
@@ -1120,10 +1158,6 @@ pub fn setup_bar(
                 if !matches!(a, Action::None) {
                     action = a;
                 }
-                a = system_audio_menu(ui, &mut s.system_audio);
-                if !matches!(a, Action::None) {
-                    action = a;
-                }
                 a = av_device_menu(
                     ui,
                     &mut s.mic,
@@ -1137,14 +1171,18 @@ pub fn setup_bar(
                 if !matches!(a, Action::None) {
                     action = a;
                 }
+                a = system_audio_menu(ui, &mut s.system_audio);
+                if !matches!(a, Action::None) {
+                    action = a;
+                }
                 bar_divider(ui);
                 let dir = s.dir();
                 let mut gear = Action::None;
-                let gear_label = format!("{}  {}", phi::GEAR_SIX, phi::CARET_DOWN);
-                let g = ui.menu_button(bar_icon(&gear_label, 18.0, BAR_ICON), |ui| {
+                let gear_btn = gear_tile(ui);
+                gear_btn.on_hover_text("Settings");
+                egui::Popup::menu(&gear_btn).show(|ui| {
                     gear = setup_gear_menu(ui, s, projects, thumbs, &dir);
                 });
-                g.response.on_hover_text("Settings and recent recordings");
                 if !matches!(gear, Action::None) {
                     action = gear;
                 }
