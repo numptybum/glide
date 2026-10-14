@@ -884,10 +884,6 @@ const BAR_LABEL: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD8);
 const BAR_MUTED: Color32 = Color32::from_rgb(0x78, 0x78, 0x80);
 const BAR_HOVER: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14);
 
-fn bar_icon(text: &str, size: f32, color: Color32) -> RichText {
-    RichText::new(text).size(size).color(color)
-}
-
 fn bar_divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(1.0, BAR_TILE_H), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(28));
